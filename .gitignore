@@ -1,0 +1,6 @@
+# Claude Code local/session config — never committed (leaks local paths; see no-mcp-servers rule)
+.claude/settings.local.json
+.claude/settings.json
+
+# macOS
+.DS_Store

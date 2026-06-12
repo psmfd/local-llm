@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon: raise the Metal wired-memory limit so a large MLX model can be
+  wired into unified memory. Runs once at boot in the system context, before any
+  user session. Installed by setup-omlx-m5.sh into /Library/LaunchDaemons.
+
+  Placeholders substituted at install time:
+    __WIRED_LIMIT_MB__  e.g. 98304 (96 GB; leaves ~32 GB for macOS on a 128 GB host)
+
+  Ownership/permissions enforced by the installer: root:wheel, 0644.
+  /etc/sysctl.conf is NOT used — it has been non-functional since macOS Big Sur.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.iogpu-wired-limit</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/sbin/sysctl</string>
+        <string>iogpu.wired_limit_mb=__WIRED_LIMIT_MB__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/iogpu-wired-limit.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/iogpu-wired-limit.log</string>
+</dict>
+</plist>

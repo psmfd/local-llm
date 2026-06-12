@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Per-user LaunchAgent: autostart the tuned oMLX server at login and keep it
+  running. We use our own wrapper (not `brew services`) because brew services
+  starts omlx with zero-config defaults and would not carry the tuned flags.
+  Installed by setup-omlx-m5.sh into ~/Library/LaunchAgents.
+
+  Placeholders substituted at install time:
+    __WRAPPER_PATH__  absolute path to omlx-start-wrapper.sh
+    __OMLX_HOME__     the user's home directory (e.g. /Users/alice)
+    __LOG_DIR__       log directory (e.g. /Users/alice/.omlx/logs)
+    __BREW_PREFIX__   Homebrew prefix (e.g. /opt/homebrew)
+
+  Ownership: the user (never root). Permissions: 0644.
+  Loaded with: launchctl bootstrap gui/$(id -u) <plist>
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.omlx</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__WRAPPER_PATH__</string>
+    </array>
+
+    <!-- KeepAlive implies RunAtLoad; both stated explicitly for clarity. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Default throttle is 10s; raise so a clean startup failure is not
+         misclassified as a crash loop and removed from the job table. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>WorkingDirectory</key>
+    <string>__OMLX_HOME__</string>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/launchagent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/launchagent.err.log</string>
+
+    <!-- launchd does not source shell profiles; Homebrew bin is not on the
+         default PATH. The wrapper also sets PATH, but set it here too. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__BREW_PREFIX__/bin:__BREW_PREFIX__/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__OMLX_HOME__</string>
+    </dict>
+</dict>
+</plist>

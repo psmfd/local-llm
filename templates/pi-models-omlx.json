@@ -1,0 +1,47 @@
+// ~/.pi/agent/models.json — oMLX local-inference provider for the Pi coding
+// agent. Installed by setup-omlx-m5.sh --configure-pi (rendered from
+// templates/pi-models-omlx.json; only written wholesale when the existing
+// providers object is empty — otherwise the rendered snippet is left at
+// ~/.omlx/pi-provider-snippet.json for a manual merge).
+//
+// apiKey uses Pi's !command resolution: the key is read from the 0600 file at
+// request time and never stored as a literal — this file contains no secret.
+//
+// compat flags for oMLX's OpenAI-completions endpoint:
+//   supportsDeveloperRole: false    — oMLX/Qwen do not accept the 'developer' role
+//   supportsReasoningEffort: false  — reasoning_effort is not implemented
+//   supportsUsageInStreaming: false — streaming usage stats not guaranteed
+//
+// Model ids are the canonical oMLX model directory names (NOT the /admin
+// aliases) — see ADR-003; switch to aliases only after validating the alias
+// round-trip on the installed oMLX version.
+//
+// contextWindow is held to 131072 (half the primary's 262K native context):
+// 16 concurrent sessions at full context would overrun the KV/wired budget
+// and collapse prefix-cache reuse.
+{
+  "providers": {
+    "omlx": {
+      "baseUrl": "http://localhost:__PORT__/v1",
+      "api": "openai-completions",
+      "apiKey": "!cat __API_KEY_FILE__",
+      "authHeader": true,
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsUsageInStreaming": false
+      },
+      "models": [
+        {
+          "id": "__PRIMARY_ID__",
+          "name": "coding-fast (local oMLX)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": __PI_CONTEXT_WINDOW__,
+          "maxTokens": __PI_MAX_TOKENS__,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }__SECONDARY_MODEL_ENTRY__
+      ]
+    }
+  }
+}
