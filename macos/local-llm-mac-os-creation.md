@@ -1,4 +1,4 @@
-# Task: provision oMLX for local coding inference on this M5 Max
+# Task: provision oMLX for local coding inference on an M5 Max
 
 > **Status:** authoritative implementation brief. Durable decisions live in
 > `CLAUDE.md` and `adrs/003-vlm-engine-workaround-lineup.md` (superseding
@@ -8,9 +8,9 @@
 > lives in `docs/router-wiring.md`. The top-level `omlx-setup-prompt.md` is a
 > historical source prompt, not an additional source of truth.
 
-You are operating on my MacBook Pro (Apple Silicon **M5 Max, 128 GB unified memory**, macOS). Provision **oMLX** (`jundot/omlx`) as a local, OpenAI/Anthropic-compatible inference server tuned for a **parallel-agent coding workload** — my orchestrator fans out 3+ concurrent agent requests that share long system prefixes, so concurrent throughput and prefix-cache reuse matter more than single-stream tok/s.
+This brief targets an Apple Silicon MacBook Pro (**M5 Max, 128 GB unified memory**, macOS). It provisions **oMLX** (`jundot/omlx`) as a local, OpenAI/Anthropic-compatible inference server tuned for a **parallel-agent coding workload** — an orchestrator fans out 3+ concurrent agent requests that share long system prefixes, so concurrent throughput and prefix-cache reuse matter more than single-stream tok/s.
 
-Follow your standard operating framework: classify the task, **plan before code and wait for my approval**, route domain subtasks agent-first, run your post-implementation review gate, and end with an efficacy report. Apply the **Script Output Conventions** (6-char labels, `ok`/`skip`/`warn`/`info`/`err`/`detail` helpers, `((counter++)) || true`, exit codes 0/1/2, `set -euo pipefail`, summary block) to any script. Use `shell-expert` for the script and `linter` for the shellcheck pass.
+The implementing agent follows its standard operating framework: classify the task, **plan before code and wait for operator approval**, route domain subtasks agent-first, run the post-implementation review gate, and end with an efficacy report. Apply the **Script Output Conventions** (6-char labels, `ok`/`skip`/`warn`/`info`/`err`/`detail` helpers, `((counter++)) || true`, exit codes 0/1/2, `set -euo pipefail`, summary block) to any script. Use `shell-expert` for the script and `linter` for the shellcheck pass.
 
 ## Hard constraints
 
@@ -20,7 +20,7 @@ Follow your standard operating framework: classify the task, **plan before code 
 
 ## Settled decisions (verify before acting — models move fast)
 
-These came out of prior analysis. Treat the runtime and serving config as decided; **re-verify the model choice and exact HuggingFace MLX repo IDs against current availability** as of today before downloading anything — search, confirm the repo exists, and confirm it still represents the best local coding model for this hardware. If something better has shipped, propose it in your plan rather than silently substituting.
+These came out of prior analysis. Treat the runtime and serving config as decided; **re-verify the model choice and exact HuggingFace MLX repo IDs against current availability** as of today before downloading anything — search, confirm the repo exists, and confirm it still represents the best local coding model for this hardware. If something better has shipped, propose it in the plan rather than silently substituting.
 
 - **Runtime:** oMLX, installed via Homebrew (`brew tap jundot/omlx https://github.com/jundot/omlx && brew install omlx`).
 - **Primary model:** a **Qwen3.6-35B-A3B at 8-bit** MLX build (`mlx-community/Qwen3.6-35B-A3B-8bit`; MoE, ~3B active → fast decode under the 614 GB/s bandwidth cap; 8-bit preserves tool-call JSON fidelity). ~38 GB resident. Alias `coding-fast`. **Requires `model_type_override = llm`** — the checkpoint carries a `vision_config` and oMLX's VLM engine crashes under concurrent requests (oMLX #1800; ADR-003). The setup script applies the override via the admin API.
@@ -36,7 +36,7 @@ These came out of prior analysis. Treat the runtime and serving config as decide
 3. **Lint it.** Run `shellcheck` and fix all Error/Warning findings; report results in the structured review format with a verdict line.
 4. **Run it**, supplying sudo when prompted for the wired-limit step.
 5. **Acquire the model(s).** Once you've verified the exact repo ID, download the primary model into `~/models` (via `hf download` or the `/admin` downloader). Confirm it loads.
-6. **Pin + alias** the primary model in the `/admin` panel (alias `coding-fast`) — pinning is panel-only, not a CLI flag, so do it via the API/UI or tell me the exact manual step if it can't be scripted.
+6. **Pin + alias** the primary model in the `/admin` panel (alias `coding-fast`) — pinning is panel-only, not a CLI flag, so do it via the API/UI or document the exact manual step for the operator if it can't be scripted.
 7. **Validate the endpoint** — `curl` `http://localhost:8000/v1/models` with the API key, then a small `/v1/chat/completions` call, and a **tool-calling** call to confirm the model emits well-formed `tool_call` markup (the orchestrator depends on this; flag if the parser needs configuration).
 
 ## Deliverables
@@ -44,7 +44,7 @@ These came out of prior analysis. Treat the runtime and serving config as decide
 - A working, pinned oMLX server reachable at `http://localhost:8000/v1` (and `/v1/messages` for Anthropic-style clients).
 - The reviewed, shellcheck-clean setup script.
 - An **ADR** (MADR minimal, in `adrs/`) recording the local-inference convention: runtime choice, model choice with the bandwidth/MoE rationale, and the serving config.
-- A note on wiring my `IInferenceBackend` / `FallbackInferenceRouter` endpoint to this server (route `coding-fast` → primary; `coding-quality` → secondary if installed).
+- A note on wiring the downstream `IInferenceBackend` / `FallbackInferenceRouter` endpoint to this server (route `coding-fast` → primary; `coding-quality` → secondary if installed).
 - An efficacy report.
 
-Stop and show me your plan before executing anything that writes, installs, or runs.
+Stop and show the operator the plan before executing anything that writes, installs, or runs.
