@@ -12,9 +12,7 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the PRIMARY model (~38 GB) via `hf download`.
-#   --with-secondary   Also download the SECONDARY model (~30 GB). Implies
-#                      --download-model. Off by default.
+#   --download-model   Download the model (~32 GB) via `hf download`. Off by default.
 #   --configure-pi     Register the oMLX provider with the Pi coding agent.
 #                      Auto-writes ~/.pi/agent/models.json ONLY when its
 #                      providers object is empty (backup taken first);
@@ -73,24 +71,22 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=100         # ~61 GB of models plus paged-SSD cache headroom (ADR-002)
+MIN_DISK_GB=100         # ~32 GB model plus paged-SSD cache headroom (ADR-004)
 
-# Repo IDs verified against the HuggingFace API on 2026-06-11 (ADR-003). Re-probed
-# before every download, but still confirm the best current model before large
-# downloads. The primary checkpoint carries a vision_config, so oMLX would route
-# it to the VLM engine, which crashes under concurrent requests (oMLX #1800) —
-# apply_model_override forces it onto the batched LLM engine. The secondary is a
-# verified text-only coder build and is concurrency-safe without an override.
-PRIMARY_REPO="mlx-community/Qwen3.6-35B-A3B-8bit"
-PRIMARY_DIR="$MODELS_DIR/Qwen3.6-35B-A3B-8bit"
+# Repo ID verified against the HuggingFace config.json on 2026-06-22 (ADR-004).
+# Re-probed before every download, but still confirm the best current model before
+# large downloads. The model is a verified text-only coder build
+# (Qwen3MoeForCausalLM, no vision_config) → it routes to oMLX's batched LLM engine
+# and is concurrency-safe with NO engine override. A single resident model keeps
+# the whole KV/prefix-cache budget under the wired ceiling for the fan-out.
+PRIMARY_REPO="lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
+PRIMARY_DIR="$MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
 PRIMARY_ALIAS="coding-fast"
-SECONDARY_REPO="lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
-SECONDARY_DIR="$MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
-SECONDARY_ALIAS="coding-quality"
 
 # Pi coding-agent provider registration (--configure-pi). contextWindow is half
-# the primary's 262K native context: 16 concurrent sessions at full context
-# would overrun the KV/wired budget and collapse prefix-cache reuse (ADR-003).
+# the model's 262144-token native context (verified config.json, rope_scaling
+# null): 16 concurrent sessions at full context would overrun the KV/wired budget
+# and collapse prefix-cache reuse (ADR-004).
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 PI_CONTEXT_WINDOW=131072
 PI_MAX_TOKENS=16384
@@ -102,7 +98,6 @@ AGENT_PLIST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
 WRAPPER_PATH="$BIN_DIR/omlx-start-wrapper.sh"
 
 DO_DOWNLOAD=false
-DO_SECONDARY=false
 DO_VALIDATE=false
 DO_CONFIGURE_PI=false
 OMLX_PRESENT=false   # set by install_omlx; gates whether the LaunchAgent is started
@@ -116,7 +111,6 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURC
 while [ $# -gt 0 ]; do
     case "$1" in
         --download-model) DO_DOWNLOAD=true ;;
-        --with-secondary) DO_DOWNLOAD=true; DO_SECONDARY=true ;;
         --configure-pi)   DO_CONFIGURE_PI=true ;;
         --validate)       DO_VALIDATE=true ;;
         --verbose)        VERBOSE=true ;;
@@ -134,6 +128,18 @@ preflight() {
         err "preflight" "not macOS (uname -s = $(uname -s))"; exit 2
     fi
     ok "preflight" "macOS detected"
+
+    # oMLX's documented support floor appears to be macOS 15 (Sequoia); this is a
+    # third-party signal, not first-party, so warn rather than hard-fail. Note the
+    # major version jumped to 26 (Tahoe) in 2025, so anything >= 15 is current.
+    local osver osmajor
+    osver="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+    osmajor="${osver%%.*}"
+    if [ "${osmajor:-0}" -lt 15 ]; then
+        record_warn "preflight" "macOS ${osver} is below 15 (Sequoia) — oMLX may require 15.0+; proceeding"
+    else
+        ok "preflight" "macOS ${osver}"
+    fi
 
     if [ "$(uname -m)" != "arm64" ]; then
         err "preflight" "not Apple Silicon (uname -m = $(uname -m))"; exit 2
@@ -349,7 +355,7 @@ check_omlx_cli() {
         record_err "omlx-cli" "failed to inspect '$omlx_bin serve --help' — verify the oMLX CLI before starting the LaunchAgent"
         return 1
     fi
-    for flag in --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --hot-cache-max-size --max-concurrent-requests --api-key; do
+    for flag in --host --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --hot-cache-max-size --max-concurrent-requests --api-key; do
         if ! printf '%s\n' "$help_text" | grep -q -- "$flag"; then
             record_err "omlx-cli" "'omlx serve --help' does not advertise expected flag: $flag"
             missing=true
@@ -512,76 +518,10 @@ download_model() {
 
 maybe_download_models() {
     if ! $DO_DOWNLOAD; then
-        skip "model" "download is opt-in — re-run with --download-model (and --with-secondary), or use the /admin downloader (verify the exact quant tags first)"
+        skip "model" "download is opt-in — re-run with --download-model, or use the /admin downloader (verify the exact quant tags first)"
         return
     fi
-    download_model "$PRIMARY_REPO" "$PRIMARY_DIR" "model-primary"
-    if $DO_SECONDARY; then
-        download_model "$SECONDARY_REPO" "$SECONDARY_DIR" "model-secondary"
-    fi
-}
-
-# --- Step: force the primary onto the batched LLM engine (ADR-003) ----------
-# The primary checkpoint carries a vision_config, so oMLX auto-classifies it as
-# VLM — and the VLM engine crashes on any second concurrent request (oMLX
-# #1800, unfixed). Setting model_type_override=llm per model forces the
-# batched text engine. Needs a running server that has discovered the model,
-# so this step degrades to a warning plus the manual /admin instruction.
-apply_model_override() {
-    local model_id; model_id="$(basename "$PRIMARY_DIR")"
-    local manual="Manual step: in http://localhost:${PORT}/admin set Model Type Override = llm for ${model_id} (required for concurrent requests; oMLX #1800 / ADR-003)"
-
-    if [ ! -r "$API_KEY_FILE" ]; then
-        record_warn "override" "API key file not readable — cannot reach the admin API yet"
-        info "$manual"
-        return
-    fi
-    local key; key="$(cat "$API_KEY_FILE")"
-    local auth="Authorization: Bearer ${key}"
-
-    # The admin API mount prefix has drifted between oMLX versions; probe both.
-    local base settings_url=""
-    for base in "http://localhost:${PORT}/admin/api" "http://localhost:${PORT}/api"; do
-        if curl -fsS --max-time 10 -H "$auth" "${base}/models/${model_id}/settings" >/dev/null 2>&1; then
-            settings_url="${base}/models/${model_id}/settings"
-            break
-        fi
-    done
-    if [ -z "$settings_url" ]; then
-        record_warn "override" "model-settings API unreachable for ${model_id} — server down or model not yet present"
-        info "$manual"
-        return
-    fi
-
-    local current
-    current="$(curl -fsS --max-time 10 -H "$auth" "$settings_url" 2>/dev/null || true)"
-    if printf '%s' "$current" | grep -q '"model_type_override"[[:space:]]*:[[:space:]]*"llm"'; then
-        skip "override" "${model_id} already pinned to the llm (batched) engine"
-        return
-    fi
-
-    # Merge into the existing settings object rather than PUTting a bare field,
-    # in case the endpoint replaces the whole settings document.
-    local payload
-    payload="$(printf '%s' "$current" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    if not isinstance(d, dict):
-        d = {}
-except Exception:
-    d = {}
-d["model_type_override"] = "llm"
-print(json.dumps(d))
-' 2>/dev/null)" || payload='{"model_type_override":"llm"}'
-
-    if curl -fsS --max-time 10 -X PUT -H "$auth" -H 'Content-Type: application/json' \
-        -d "$payload" "$settings_url" >/dev/null 2>&1; then
-        ok "override" "${model_id} forced onto the llm (batched) engine — validate with the concurrency probe"
-    else
-        record_warn "override" "PUT to ${settings_url} failed"
-        info "$manual"
-    fi
+    download_model "$PRIMARY_REPO" "$PRIMARY_DIR" "model"
 }
 
 # --- Step: Pi coding-agent provider registration (--configure-pi) -----------
@@ -591,11 +531,10 @@ print(json.dumps(d))
 # parse shows an empty providers object (backup taken first; git covers the
 # rest). Anything else gets the rendered snippet plus manual merge steps.
 print_pi_settings_instructions() {
-    local settings_file="$1" primary_id="$2" secondary_id="$3"
+    local settings_file="$1" primary_id="$2"
     # settings.json is hand-curated and git-tracked; never edited automatically.
-    info "To surface the models in Pi's picker, add to the enabledModels array in $settings_file:"
+    info "To surface the model in Pi's picker, add to the enabledModels array in $settings_file:"
     echo "      \"omlx/${primary_id}\""
-    echo "      \"omlx/${secondary_id}\"   (if the secondary is installed)"
     echo "      Select with: pi --model omlx/${primary_id}  (or /model in a session — models.json reloads on /model)"
 }
 
@@ -614,24 +553,15 @@ configure_pi_provider() {
     local models_file="$PI_AGENT_DIR/models.json"
     local settings_file="$PI_AGENT_DIR/settings.json"
     local snippet_dest="$OMLX_HOME/pi-provider-snippet.json"
-    local primary_id secondary_id secondary_entry=""
+    local primary_id
     primary_id="$(basename "$PRIMARY_DIR")"
-    secondary_id="$(basename "$SECONDARY_DIR")"
-
-    # Register the secondary when requested this run or already on disk.
-    if $DO_SECONDARY || { [ -d "$SECONDARY_DIR" ] && [ -n "$(ls -A "$SECONDARY_DIR" 2>/dev/null)" ]; }; then
-        # Flat single-line JSON: render_template substitutes via BSD sed, which
-        # cannot carry literal newlines in the replacement value.
-        secondary_entry=", {\"id\": \"${secondary_id}\", \"name\": \"${SECONDARY_ALIAS} (local oMLX)\", \"reasoning\": false, \"input\": [\"text\"], \"contextWindow\": ${PI_CONTEXT_WINDOW}, \"maxTokens\": ${PI_MAX_TOKENS}, \"cost\": {\"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0}}"
-    fi
 
     if render_template "$TEMPLATE_DIR/pi-models-omlx.json" "$snippet_dest" \
-        "__PORT__"                  "$PORT" \
-        "__API_KEY_FILE__"          "$API_KEY_FILE" \
-        "__PRIMARY_ID__"            "$primary_id" \
-        "__PI_CONTEXT_WINDOW__"     "$PI_CONTEXT_WINDOW" \
-        "__PI_MAX_TOKENS__"         "$PI_MAX_TOKENS" \
-        "__SECONDARY_MODEL_ENTRY__" "$secondary_entry"; then
+        "__PORT__"              "$PORT" \
+        "__API_KEY_FILE__"      "$API_KEY_FILE" \
+        "__PRIMARY_ID__"        "$primary_id" \
+        "__PI_CONTEXT_WINDOW__" "$PI_CONTEXT_WINDOW" \
+        "__PI_MAX_TOKENS__"     "$PI_MAX_TOKENS"; then
         ok "pi-config" "rendered provider snippet: $snippet_dest"
     else
         case "$?" in
@@ -643,7 +573,7 @@ configure_pi_provider() {
     # Idempotency: never rewrite a models.json that already names this provider.
     if [ -f "$models_file" ] && grep -q '"omlx"' "$models_file"; then
         skip "pi-config" "\"omlx\" provider already present in $models_file (left untouched)"
-        print_pi_settings_instructions "$settings_file" "$primary_id" "$secondary_id"
+        print_pi_settings_instructions "$settings_file" "$primary_id"
         return
     fi
 
@@ -683,7 +613,7 @@ PYEOF
         info "Insert the \"omlx\" block from $snippet_dest into the providers object of $models_file"
     fi
 
-    print_pi_settings_instructions "$settings_file" "$primary_id" "$secondary_id"
+    print_pi_settings_instructions "$settings_file" "$primary_id"
 }
 
 # --- Pin/alias instructions (GUI-only; cannot be scripted) ------------------
@@ -693,11 +623,8 @@ print_pin_instructions() {
     info "Model pin + alias is admin-panel only (not a CLI flag). Manual steps:"
     echo "      1. Ensure the server is running, then open http://localhost:${PORT}/admin"
     echo "      2. Under Models, set the alias for $(basename "$PRIMARY_DIR") to '${PRIMARY_ALIAS}' and PIN it (keeps it resident)."
-    if $DO_SECONDARY; then
-        echo "      3. Set the alias for $(basename "$SECONDARY_DIR") to '${SECONDARY_ALIAS}'."
-    fi
-    echo "      Aliases persist in ${OMLX_HOME}/settings.json and appear in GET /v1/models."
-    echo "      Confirm Model Type Override = llm on $(basename "$PRIMARY_DIR") if the scripted override warned (oMLX #1800; ADR-003)."
+    echo "      The alias persists in ${OMLX_HOME}/settings.json and appears in GET /v1/models."
+    echo "      No engine override is needed — the model is text-only (Qwen3MoeForCausalLM); ADR-004."
 }
 
 # --- Validation -------------------------------------------------------------
@@ -749,18 +676,18 @@ validate_endpoint() {
         record_err "validate-tools" "tool-calling request failed"
     fi
 
-    # 4. concurrency probe — two parallel completions. The VLM engine crashes on
-    # a second concurrent request (oMLX #1800); model_type_override=llm is the
-    # fix (ADR-003). A single-stream validate cannot catch a broken override.
+    # 4. concurrency probe — two parallel completions confirm the batched LLM
+    # engine handles the fan-out this project exists to serve. A single-stream
+    # check cannot detect a server that serializes or fails under concurrency.
     local pid1 pid2 rc1=0 rc2=0
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid1=$!
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid2=$!
     wait "$pid1" || rc1=$?
     wait "$pid2" || rc2=$?
     if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]; then
-        ok "validate-concurrent" "2 parallel completions succeeded (batched engine confirmed)"
+        ok "validate-concurrent" "2 parallel completions succeeded (batched engine handles concurrency)"
     else
-        record_err "validate-concurrent" "parallel completions failed (rc ${rc1}/${rc2}) — likely oMLX #1800: set Model Type Override = llm for the primary in /admin (ADR-003)"
+        record_err "validate-concurrent" "parallel completions failed (rc ${rc1}/${rc2}) — check --max-concurrent-requests and the server logs ($LOG_DIR)"
     fi
 
     # 5. Anthropic-style messages endpoint (spec requires /v1/messages reachability)
@@ -790,7 +717,6 @@ summary() {
 main() {
     if $DO_VALIDATE; then
         command -v curl >/dev/null 2>&1 || { err "validate" "curl not found"; exit 2; }
-        apply_model_override
         validate_endpoint
         summary
     fi
@@ -805,7 +731,6 @@ main() {
     install_wired_limit
     install_service
     maybe_download_models
-    apply_model_override
     if $DO_CONFIGURE_PI; then
         configure_pi_provider
     else

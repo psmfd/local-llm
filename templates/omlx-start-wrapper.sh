@@ -58,9 +58,9 @@ fi
 # saturation surfaces as server-level backpressure, not Metal wiring failures. It
 # replaced the removed --max-process-memory flag (ADR-002); per oMLX #702 it
 # monitors Metal allocations, not total RSS.
-# --hot-cache-max-size takes an absolute size only ('8GB' style) — parse_size in
-# 0.4.4rc1 rejects percentages, crash-looping the agent. 18GB ≈ the original
-# 20%-of-guard intent.
+# --hot-cache-max-size accepts both absolute sizes ('18GB') and percentages
+# ('20%'). We pin an absolute 18GB for a deterministic hot-cache footprint
+# independent of how oMLX resolves a percentage (≈ 20% of the 90 GB guard).
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \

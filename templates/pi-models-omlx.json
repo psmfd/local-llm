@@ -13,12 +13,12 @@
 //   supportsUsageInStreaming: false — streaming usage stats not guaranteed
 //
 // Model ids are the canonical oMLX model directory names (NOT the /admin
-// aliases) — see ADR-003; switch to aliases only after validating the alias
+// aliases) — see ADR-004; switch to aliases only after validating the alias
 // round-trip on the installed oMLX version.
 //
-// contextWindow is held to 131072 (half the primary's 262K native context):
-// 16 concurrent sessions at full context would overrun the KV/wired budget
-// and collapse prefix-cache reuse.
+// contextWindow is held to 131072 (half the model's 262144-token native
+// context): 16 concurrent sessions at full context would overrun the KV/wired
+// budget and collapse prefix-cache reuse.
 {
   "providers": {
     "omlx": {
@@ -40,7 +40,7 @@
           "contextWindow": __PI_CONTEXT_WINDOW__,
           "maxTokens": __PI_MAX_TOKENS__,
           "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
-        }__SECONDARY_MODEL_ENTRY__
+        }
       ]
     }
   }
