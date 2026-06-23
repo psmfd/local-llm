@@ -31,6 +31,11 @@
 #   2  Environment or precondition failure (wrong OS/arch, insufficient
 #      RAM/disk, Homebrew missing, etc.).
 #
+# The server is on-demand: setup does NOT start it and it does NOT start at login
+# (the LaunchAgent is RunAtLoad=false). Start/stop it intentionally with the
+# installed `omlxctl` tool: `omlxctl start | stop | restart | status | logs`
+# (ADR-005).
+#
 # NOTE: oMLX's exact CLI surface and the model repo IDs were verified against
 # live sources at authoring time but may drift. The script and the start wrapper
 # fail loudly rather than silently mis-configuring. Confirm `omlx --help` and the
@@ -96,6 +101,7 @@ DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 AGENT_LABEL="com.local.omlx"
 AGENT_PLIST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
 WRAPPER_PATH="$BIN_DIR/omlx-start-wrapper.sh"
+CONTROL_PATH="$BIN_DIR/omlxctl"   # on-demand start/stop control (ADR-005)
 
 DO_DOWNLOAD=false
 DO_VALIDATE=false
@@ -415,10 +421,12 @@ install_service() {
         esac
     fi
 
-    # Do not start the service if the binary is missing — it would only crash-loop
-    # under KeepAlive. The config is installed; starting waits until omlx exists.
+    # Register the LaunchAgent only once omlx exists. The agent is RunAtLoad=false,
+    # so bootstrapping it merely makes the job kickstart-able (it does NOT start the
+    # server, here or at login). The config is installed regardless; registration
+    # waits until omlx exists so `omlxctl start` has something to launch.
     if ! $OMLX_PRESENT; then
-        record_warn "agent" "omlx not installed — LaunchAgent configured but not started; re-run after installing omlx"
+        record_warn "agent" "omlx not installed — LaunchAgent configured but not registered; re-run after installing omlx"
         return
     fi
     if ! check_omlx_cli "$prefix"; then
@@ -429,19 +437,56 @@ install_service() {
         if $svc_changed; then
             launchctl bootout "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null || true
             if launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
-                ok "agent" "reloaded LaunchAgent (wrapper or plist changed)"
+                ok "agent" "re-registered LaunchAgent (wrapper or plist changed; not started)"
             else
                 record_err "agent" "launchctl bootstrap (reload) failed"
             fi
         else
-            skip "agent" "LaunchAgent already loaded"
+            skip "agent" "LaunchAgent already registered"
         fi
     else
         if launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
-            ok "agent" "LaunchAgent bootstrapped (autostarts at login)"
+            ok "agent" "LaunchAgent registered (on-demand — NOT started at login; start with: omlxctl start)"
         else
             record_err "agent" "launchctl bootstrap gui failed"
         fi
+    fi
+}
+
+# --- Step: install the omlxctl control tool ---------------------------------
+# omlxctl is a static script (no placeholder substitution); render_template with
+# no key/value pairs just stages + copies it with the standard idempotency check.
+# Per the "Both" install choice (ADR-005): symlink it into the Homebrew bin when
+# that directory is writable, and always print the manual PATH fallback.
+install_control() {
+    info "Installing the omlxctl on-demand control tool"
+
+    if render_template "$TEMPLATE_DIR/omlxctl" "$CONTROL_PATH"; then
+        chmod 755 "$CONTROL_PATH"
+        ok "control" "installed $CONTROL_PATH"
+    else
+        case "$?" in
+            1) chmod 755 "$CONTROL_PATH"; skip "control" "$CONTROL_PATH already current" ;;
+            2) return 0 ;;   # render_template already recorded the error
+            *) record_err "control" "unexpected render_template status"; return 0 ;;
+        esac
+    fi
+
+    # Symlink into the Homebrew bin so `omlxctl` is on PATH (Both: link + fallback).
+    local link; link="$(brew_prefix)/bin/omlxctl"
+    local bindir; bindir="$(dirname "$link")"
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "$CONTROL_PATH" ]; then
+        skip "control-link" "$link already -> $CONTROL_PATH"
+    elif [ -e "$link" ] && [ ! -L "$link" ]; then
+        record_warn "control-link" "$link exists and is not our symlink — not overwriting; invoke $CONTROL_PATH directly"
+    elif [ -w "$bindir" ]; then
+        if ln -sfn "$CONTROL_PATH" "$link"; then
+            ok "control-link" "symlinked $link -> $CONTROL_PATH (run: omlxctl start)"
+        else
+            record_warn "control-link" "failed to symlink $link — run manually: ln -sfn $CONTROL_PATH $link"
+        fi
+    else
+        record_warn "control-link" "$bindir not writable — run: ln -sfn $CONTROL_PATH $link  (or add ~/.omlx/bin to PATH)"
     fi
 }
 
@@ -621,7 +666,7 @@ print_pin_instructions() {
     # Printed unconditionally (not via detail/--verbose): pinning is GUI-only and
     # cannot be scripted, so these are required manual steps, not optional detail.
     info "Model pin + alias is admin-panel only (not a CLI flag). Manual steps:"
-    echo "      1. Ensure the server is running, then open http://localhost:${PORT}/admin"
+    echo "      1. Start the server (omlxctl start), then open http://localhost:${PORT}/admin"
     echo "      2. Under Models, set the alias for $(basename "$PRIMARY_DIR") to '${PRIMARY_ALIAS}' and PIN it (keeps it resident)."
     echo "      The alias persists in ${OMLX_HOME}/settings.json and appears in GET /v1/models."
     echo "      No engine override is needed — the model is text-only (Qwen3MoeForCausalLM); ADR-004."
@@ -730,6 +775,7 @@ main() {
     ensure_api_key
     install_wired_limit
     install_service
+    install_control
     maybe_download_models
     if $DO_CONFIGURE_PI; then
         configure_pi_provider
@@ -738,7 +784,9 @@ main() {
     fi
     print_pin_instructions
 
-    info "Done. Validate with: $0 --validate"
+    info "The server is installed but NOT running (startup is intentional)."
+    info "Start it on demand:  omlxctl start    (stop: omlxctl stop, status: omlxctl status)"
+    info "Then validate with:  $0 --validate"
     summary
 }
 

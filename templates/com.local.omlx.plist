@@ -2,10 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Per-user LaunchAgent: autostart the tuned oMLX server at login and keep it
-  running. We use our own wrapper (not `brew services`) because brew services
-  starts omlx with zero-config defaults and would not carry the tuned flags.
-  Installed by setup-omlx-m5.sh into ~/Library/LaunchAgents.
+  Per-user LaunchAgent: ON-DEMAND tuned oMLX server. It is NOT started at login.
+  launchd bootstraps (registers) this job into gui/$(id -u) automatically when it
+  scans ~/Library/LaunchAgents at login, but RunAtLoad=false means the process
+  does not start — the job sits in `state = waiting` until an explicit
+  `launchctl kickstart` (issued by omlxctl). KeepAlive=false means a stop is final
+  (no resurrection) and a crash is not auto-respawned — deliberate, both so startup
+  is intentional and to avoid a GPU-hang crash loop (oMLX issue #15, ADR-005).
+  We use our own wrapper (not `brew services`) because brew services starts omlx
+  with zero-config defaults and would not carry the tuned flags. Start/stop with
+  `omlxctl start` / `omlxctl stop`. Installed by setup-omlx-m5.sh.
 
   Placeholders substituted at install time:
     __WRAPPER_PATH__  absolute path to omlx-start-wrapper.sh
@@ -14,7 +20,8 @@
     __BREW_PREFIX__   Homebrew prefix (e.g. /opt/homebrew)
 
   Ownership: the user (never root). Permissions: 0644.
-  Loaded with: launchctl bootstrap gui/$(id -u) <plist>
+  Loaded with: launchctl bootstrap gui/$(id -u) <plist>  (registers; does not run)
+  Started with: launchctl kickstart gui/$(id -u)/com.local.omlx
 -->
 <plist version="1.0">
 <dict>
@@ -26,16 +33,15 @@
         <string>__WRAPPER_PATH__</string>
     </array>
 
-    <!-- KeepAlive implies RunAtLoad; both stated explicitly for clarity. -->
+    <!-- On-demand: do NOT run at login, and do NOT auto-restart. Both are the
+         launchd defaults; stated explicitly so the on-demand intent is legible.
+         RunAtLoad=false → loaded-but-waiting at login (no process started).
+         KeepAlive=false → a `launchctl kill` is final; a crash stays down.
+         (No ThrottleInterval: it only governs KeepAlive restart debounce.) -->
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
     <key>KeepAlive</key>
-    <true/>
-
-    <!-- Default throttle is 10s; raise so a clean startup failure is not
-         misclassified as a crash loop and removed from the job table. -->
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
+    <false/>
 
     <key>WorkingDirectory</key>
     <string>__OMLX_HOME__</string>
