@@ -9,9 +9,11 @@ oMLX and falling through to a remote backend on failure or saturation.
   OpenAI chat-completions shape.
 - **Auth:** bearer key read once at startup from `OMLX_API_KEY`, else from the
   0600 file `~/.omlx/api-key`. **Never hardcode the key.**
-- **Aliases:** the `model` field carries the oMLX alias — `coding-fast`
-  (primary) or `coding-quality` (secondary). Aliases are set in the `/admin` panel
-  (see [ADR-002](../adrs/002-qwen36-lineup-memory-guard.md)).
+- **Aliases:** the `model` field carries the oMLX alias. This host serves only
+  `coding-fast` (the single local model); `coding-quality` is intentionally **not**
+  backed locally and falls through to a remote backend (see
+  [ADR-004](../adrs/004-single-text-only-model-no-override.md)). The alias is set in
+  the `/admin` panel.
 - **Concurrency:** typed `HttpClient` via `IHttpClientFactory` +
   `AddStandardResilienceHandler` so a local hiccup degrades into the fallback
   router rather than throwing.
@@ -228,10 +230,12 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 - **Order = priority.** Register oMLX first; the router iterates registration
   order, so the local backend is primary for every role. It catches
   `InferenceUnavailableException` and advances to the next backend.
-- **Role routing.** Both roles map through the alias dictionary. If `coding-quality`
-  is not installed, oMLX errors for that model → wrapped as
-  `InferenceUnavailableException` → fallback. No startup "is it installed?" check
-  needed.
+- **Role routing.** Both roles map through the alias dictionary. `coding-quality`
+  is intentionally not served locally (single-model host, ADR-004): oMLX errors for
+  that model → wrapped as `InferenceUnavailableException` → fallback to the next
+  backend. No startup "is it installed?" check needed. (If you prefer the local
+  model to answer both roles, point `ModelRole.Quality` at `coding-fast` in the
+  alias dictionary.)
 - **Saturation.** oMLX runs at `--max-concurrent-requests 16`; a 429 trips the
   circuit breaker, diverting traffic to the remote backend until it recovers.
 

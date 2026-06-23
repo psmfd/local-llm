@@ -1,6 +1,6 @@
 # ADR-003: Force the LLM engine for the VLM-classified primary; swap the secondary to a text-only coder
 
-- Status: accepted
+- Status: superseded by ADR-004
 - Date: 2026-06-11
 
 Supersedes [ADR-002](002-qwen36-lineup-memory-guard.md) for the model lineup
