@@ -9,8 +9,11 @@ You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max;
 ```bash
 git clone https://github.com/psmfd/local-llm.git && cd local-llm
 ./setup-omlx-m5.sh --download-model   # install + configure + fetch the model (~32 GB)
+omlxctl start                         # start the server on demand (NOT at login)
 ./setup-omlx-m5.sh --validate         # smoke-test the running server
 ```
+
+The server is **on-demand**: setup installs it but does not start it, and it does **not** start at login — startup is intentional. Start, stop, and reclaim memory with `omlxctl` (see [Starting and stopping](#starting-and-stopping)).
 
 Then point any OpenAI-style client at `http://localhost:8000/v1` (or Anthropic-style at `/v1/messages`) with the API key from `~/.omlx/api-key`. Done.
 
@@ -25,7 +28,7 @@ The script is idempotent — re-running it skips whatever already exists. Run `.
 3. **Creates directories** — `~/models`, `~/.omlx/{cache,logs,bin}` (`~/.omlx` is chmod 700).
 4. **Generates an API key** at `~/.omlx/api-key` (chmod 600, never printed).
 5. **Raises the Metal wired limit** to ~96 GB so the GPU can hold the model resident, persisted across reboots via a root LaunchDaemon (**the sudo step**).
-6. **Installs autostart** — a start wrapper carrying the tuned serving flags plus a per-user LaunchAgent.
+6. **Installs on-demand service control** — a start wrapper carrying the tuned serving flags, a per-user LaunchAgent (`RunAtLoad=false`, `KeepAlive=false` — registered at login but **not** started), and the `omlxctl` control tool (symlinked onto your `PATH` when the Homebrew bin is writable). Setup deliberately leaves the server stopped ([ADR-005](adrs/005-on-demand-service-lifecycle.md)).
 
 Model download is **opt-in** (`--download-model`); the base run never pulls weights. No engine override is applied — the model is text-only, so oMLX runs it on its batched LLM engine and it is concurrency-safe as-is ([ADR-004](adrs/004-single-text-only-model-no-override.md)).
 
@@ -36,6 +39,22 @@ Model download is **opt-in** (`--download-model`); the base run never pulls weig
 | `coding-fast` | `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` (MoE, ~3 B active) | ~32 GB | Verified text-only (`Qwen3MoeForCausalLM`), 262 K native context, 8-bit preserves tool-call JSON fidelity, concurrency-safe with no override |
 
 A single resident model keeps the full KV/prefix-cache budget free for the parallel-agent fan-out. The `coding-quality` router role has no local model and falls through to a remote backend (see [docs/router-wiring.md](docs/router-wiring.md)). Re-verify the HuggingFace repo ID against current availability before downloading — the script probes it, but better checkpoints ship often. Pinning + aliasing is done in the admin panel at `http://localhost:8000/admin` (the script prints the manual steps).
+
+## Starting and stopping
+
+Startup is intentional — nothing wires the ~32 GB model until you ask. Control the server with `omlxctl` (installed to `~/.omlx/bin/omlxctl`, symlinked onto `PATH` when possible; otherwise call it by full path or add `~/.omlx/bin` to `PATH`):
+
+```bash
+omlxctl start     # kickstart the server, then wait for /health (cold start ~90 s)
+omlxctl stop      # SIGTERM, flush hot cache to SSD, then SIGKILL after 30 s — releases memory
+omlxctl restart   # atomic restart, then wait for ready
+omlxctl status    # launchd registration/run state + /health readiness
+omlxctl logs      # recent stdout/stderr (live: tail -f ~/.omlx/logs/launchagent.*.log)
+```
+
+**Why on-demand?** The LaunchAgent is `RunAtLoad=false` + `KeepAlive=false`, so logging in registers the job but never starts it, and a stop (or crash) stays down — no auto-respawn. Stopping fully reclaims the unified memory the model held. The root `iogpu.wired_limit_mb` LaunchDaemon stays loaded the whole time: it is a ceiling, not a reservation, and costs nothing while the server is stopped. Rationale and trade-offs: [ADR-005](adrs/005-on-demand-service-lifecycle.md).
+
+After a reboot or login, run `omlxctl start` to bring the server back.
 
 ## Validating
 
@@ -53,9 +72,9 @@ A single resident model keeps the full KV/prefix-cache budget free for the paral
 | Path | What it is |
 |---|---|
 | [`setup-omlx-m5.sh`](setup-omlx-m5.sh) | The provisioning script (idempotent; exit codes `0` pass / `1` error / `2` precondition) |
-| [`templates/`](templates/) | Start wrapper, LaunchAgent/LaunchDaemon plists, Pi provider block — installed with placeholder substitution |
+| [`templates/`](templates/) | Start wrapper, LaunchAgent/LaunchDaemon plists, `omlxctl` control tool, Pi provider block — installed with placeholder substitution |
 | [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md) | The authoritative implementation brief |
-| [`adrs/`](adrs/) | Decision records — [ADR-004](adrs/004-single-text-only-model-no-override.md) is current (single text-only model, override retired) |
+| [`adrs/`](adrs/) | Decision records — [ADR-004](adrs/004-single-text-only-model-no-override.md) (single text-only model) and [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart) |
 | `.claude/agents/`, `.github/agents/` | Repository-resident `omlx-expert` domain agent (read-only/advisory) for Claude Code and GitHub Copilot |
 | [`docs/router-wiring.md`](docs/router-wiring.md) | Wiring the server into a .NET `IInferenceBackend` / `FallbackInferenceRouter` |
 | [`omlx-setup-prompt.md`](omlx-setup-prompt.md) | Historical source prompt only — not a source of truth |
@@ -65,8 +84,10 @@ A single resident model keeps the full KV/prefix-cache budget free for the paral
 There is no `--uninstall` flag; reverse the steps manually (see the Teardown section in [CLAUDE.md](CLAUDE.md)):
 
 ```bash
+omlxctl stop 2>/dev/null || true                       # stop the server, release memory
 launchctl bootout gui/$(id -u)/com.local.omlx 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.local.omlx.plist
+rm -f "$(brew --prefix)/bin/omlxctl"                   # the on-PATH symlink, if created
 sudo launchctl bootout system/com.local.iogpu-wired-limit 2>/dev/null || true
 sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 brew uninstall omlx && brew untap jundot/omlx

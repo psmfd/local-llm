@@ -27,11 +27,19 @@ copy it forward as an additional source of truth.
 The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user):
 
 ```bash
-./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service (no model download)
+./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service + omlxctl (no model download; server NOT started)
 ./setup-omlx-m5.sh --download-model # also fetch the model (~32 GB) via hf
 ./setup-omlx-m5.sh --configure-pi   # register the oMLX provider with the Pi coding agent (~/.pi/agent/models.json)
 ./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency) against a running server
 ./setup-omlx-m5.sh --verbose --help
+```
+
+The server is **on-demand** (it does not start at login, and setup does not start
+it). Start/stop it intentionally with the installed `omlxctl` tool (ADR-005):
+
+```bash
+omlxctl start    # kickstart + wait for /health  |  omlxctl stop    # SIGTERM→SIGKILL(30s), release memory
+omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + /health state  |  omlxctl logs
 ```
 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. Lint with the
@@ -83,30 +91,39 @@ best-current-model review.
   for a deterministic footprint), `--max-concurrent-requests 16` (oMLX default is
   8), `--api-key` from the 0600 file.
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
-  across reboot via a LaunchDaemon (sudo).
-- **Autostart:** per-user LaunchAgent running a start wrapper that carries the tuned
-  flags (`brew services` only starts with zero-config defaults).
+  across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
+  server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
+- **On-demand lifecycle (no login autostart):** per-user LaunchAgent running a start
+  wrapper that carries the tuned flags (`brew services` only starts with zero-config
+  defaults). The agent is `RunAtLoad=false` + `KeepAlive=false`, so login registers
+  the job but never starts it, and a stop/crash stays down (no respawn — avoids the
+  oMLX issue #15 GPU-hang crash loop). Start/stop is intentional via `omlxctl`
+  (`kickstart` / `kill SIGTERM`→`SIGKILL` after 30s / `kickstart -k`); setup leaves
+  the server stopped (ADR-005).
 
 ## Layout
 
 - `setup-omlx-m5.sh` — the provisioning script. Installs oMLX (no MCP);
   creates `~/models`, `~/.omlx/{cache,logs,bin}`; generates the 0600 API key;
-  sets + persists the wired limit; installs the start wrapper + LaunchAgent;
-  **model download is opt-in (default off)**; `--configure-pi` registers the
-  provider with the Pi coding agent. No engine override step — the model is
-  text-only (ADR-004).
+  sets + persists the wired limit; installs the start wrapper + LaunchAgent (on-
+  demand, RunAtLoad=false) + the `omlxctl` control tool (symlinked onto PATH when
+  the brew bin is writable); **model download is opt-in (default off)**; leaves the
+  server stopped; `--configure-pi` registers the provider with the Pi coding agent.
+  No engine override step — the model is text-only (ADR-004).
 - `templates/` — committed templates the script installs with placeholder
   substitution: `omlx-start-wrapper.sh`, the `com.local.omlx.plist` LaunchAgent,
-  the `com.local.iogpu-wired-limit.plist` root LaunchDaemon, and
-  `pi-models-omlx.json` (the Pi coding-agent provider block).
+  the `com.local.iogpu-wired-limit.plist` root LaunchDaemon, `omlxctl` (the
+  on-demand control tool — static, no placeholders, installed to `~/.omlx/bin`),
+  and `pi-models-omlx.json` (the Pi coding-agent provider block).
 - `.claude/agents/omlx-expert.md` + `.github/agents/omlx-expert.agent.md` —
   repository-resident `omlx-expert` domain agent (oMLX runtime + MLX model
   selection + Apple-Silicon memory tuning), read-only/advisory, in both Claude
   Code and GitHub Copilot wrapper formats. Keep the two wrappers in sync.
-- `adrs/` — `004-single-text-only-model-no-override.md` records the current
+- `adrs/` — `004-single-text-only-model-no-override.md` records the current model
   convention (superseding `003`, which superseded `002`, which superseded `001`);
-  `TEMPLATE.md` is the MADR minimal template for new ADRs (sequential, zero-padded
-  three digits).
+  `005-on-demand-service-lifecycle.md` records the on-demand start/stop lifecycle
+  (no login autostart) — additive, not a supersession of `004`; `TEMPLATE.md` is the
+  MADR minimal template for new ADRs (sequential, zero-padded three digits).
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
   `FallbackInferenceRouter`.
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
@@ -127,11 +144,14 @@ substitution — edit the template file, not the rendered output.
 ### Runtime artifacts (created on the host, never committed)
 
 - `~/.omlx/` (chmod 700) containing `api-key` (0600), `bin/omlx-start-wrapper.sh`,
-  `cache/`, `logs/`, `pi-provider-snippet.json` (rendered by `--configure-pi`), and
+  `bin/omlxctl` (the on-demand control tool), `cache/`, `logs/`,
+  `pi-provider-snippet.json` (rendered by `--configure-pi`), and
   `settings.json` (oMLX-managed; **contains a copy of the API key** at
   `.auth.api_key` because oMLX persists its CLI args — the script chmods it 0600)
+- `$(brew --prefix)/bin/omlxctl` — symlink to `~/.omlx/bin/omlxctl`, created only
+  when the brew bin is writable (otherwise the script prints the manual `ln`/PATH step)
 - `~/models/` — downloaded MLX model directories
-- `~/Library/LaunchAgents/com.local.omlx.plist` (per-user)
+- `~/Library/LaunchAgents/com.local.omlx.plist` (per-user; RunAtLoad=false)
 - `/Library/LaunchDaemons/com.local.iogpu-wired-limit.plist` (root:wheel, sudo)
 - `~/.pi/agent/models.json` — written by `--configure-pi` only when its
   `providers` object is empty (it lives in the user's version-controlled Pi
@@ -160,9 +180,11 @@ the `coding-quality` role has no local model and falls through to a remote backe
 There is no `--uninstall` flag; reverse the steps manually:
 
 ```bash
-# 1. Stop + remove the per-user LaunchAgent
+# 1. Stop the server, then remove the per-user LaunchAgent + omlxctl symlink
+omlxctl stop 2>/dev/null || true
 launchctl bootout gui/$(id -u)/com.local.omlx 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.local.omlx.plist
+rm -f "$(brew --prefix)/bin/omlxctl"   # the on-PATH symlink, if it was created
 
 # 2. Stop + remove the root LaunchDaemon (wired limit reverts to the OS default at next boot)
 sudo launchctl bootout system/com.local.iogpu-wired-limit 2>/dev/null || true

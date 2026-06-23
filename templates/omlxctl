@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+#
+# omlxctl — on-demand control for the tuned oMLX inference server LaunchAgent.
+#
+# The server is NOT started at login (the LaunchAgent is RunAtLoad=false). Startup
+# is intentional: this tool starts it on demand and stops it cleanly so the
+# resident model (~32 GB) + KV/prefix cache are released back to the system.
+#
+# Usage:
+#   omlxctl start    Start the server (no-op if already running); wait for ready
+#   omlxctl stop     Stop the server cleanly (SIGTERM, then SIGKILL after 30s)
+#   omlxctl restart  Restart the server; wait for ready
+#   omlxctl status   Show launchd + readiness state
+#   omlxctl logs     Show recent stdout/stderr log lines
+#
+# Exit codes:
+#   0  operation succeeded (or state already correct — idempotent)
+#   1  operation failed
+#   2  precondition failure (service not bootstrapped, log dir missing, bad usage)
+#
+# Installed by setup-omlx-m5.sh to ~/.omlx/bin/omlxctl. Because it is installed
+# standalone outside the repo tree, the output helpers are defined inline (per the
+# script-output conventions) rather than sourced. See ADR-005.
+
+set -euo pipefail
+
+# --- Output helpers (inline; standalone install) ----------------------------
+ok()     { printf 'OK    [%s] %s\n' "$1" "$2"; }
+skip()   { printf 'SKIP  [%s] %s\n' "$1" "$2"; }
+warn()   { printf 'WARN  [%s] %s\n' "$1" "$2" >&2; }
+info()   { printf 'INFO  %s\n' "$*"; }
+err()    { printf 'ERROR [%s] %s\n' "$1" "$2" >&2; }
+detail() { [ "${VERBOSE:-0}" = "1" ] && printf '      %s\n' "$*" || true; }
+
+# --- Configuration ----------------------------------------------------------
+LABEL="com.local.omlx"
+UID_VAL="$(id -u)"
+TARGET="gui/${UID_VAL}/${LABEL}"
+PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+
+PORT="${OMLX_PORT:-8000}"
+HEALTH_URL="http://127.0.0.1:${PORT}/health"   # oMLX /health needs no auth key
+
+LOG_DIR="${OMLX_LOG_DIR:-${HOME}/.omlx/logs}"
+STDOUT_LOG="${LOG_DIR}/launchagent.out.log"
+STDERR_LOG="${LOG_DIR}/launchagent.err.log"
+TAIL_LINES="${OMLX_TAIL_LINES:-80}"
+
+# Cold start loads ~32 GB from disk and wires it; ~90s is typical, so poll /health
+# up to READY_TIMEOUT. SIGTERM flushes up to 18 GB of hot cache to SSD on shutdown,
+# so allow STOP_TIMEOUT before escalating to SIGKILL. (ADR-005; omlx serve timings.)
+READY_TIMEOUT="${OMLX_READY_TIMEOUT:-120}"
+STOP_TIMEOUT="${OMLX_STOP_TIMEOUT:-30}"
+
+# --- State helpers ----------------------------------------------------------
+# launchctl print: exit 113 = service not bootstrapped in this domain.
+_is_bootstrapped() { launchctl print "$TARGET" >/dev/null 2>&1; }
+
+# `state = running` appears in launchctl print output only while the process runs.
+# (launchctl print output is explicitly not API; this substring has been stable
+# from Catalina through Tahoe and is the best available signal.)
+_is_running() { launchctl print "$TARGET" 2>/dev/null | grep -q 'state = running'; }
+
+_require_bootstrapped() {
+    if ! _is_bootstrapped; then
+        err "omlxctl" "service ${LABEL} is not registered in gui/${UID_VAL}"
+        info "Register it (normally done at login by launchd):"
+        info "  launchctl bootstrap gui/${UID_VAL} ${PLIST}"
+        info "or re-run setup-omlx-m5.sh."
+        exit 2
+    fi
+}
+
+_have_curl() { command -v curl >/dev/null 2>&1; }
+
+_health_ok() { _have_curl && curl -sf --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; }
+
+# Poll /health until ready or READY_TIMEOUT elapses. Returns 0 ready, 1 timed out.
+_wait_ready() {
+    if ! _have_curl; then
+        warn "ready" "curl not found — cannot probe ${HEALTH_URL}; assuming started"
+        return 0
+    fi
+    local deadline=$(( $(date +%s) + READY_TIMEOUT ))
+    info "Waiting for ${HEALTH_URL} (up to ${READY_TIMEOUT}s; cold start loads ~32 GB)"
+    while :; do
+        if _health_ok; then return 0; fi
+        if ! _is_running; then
+            err "ready" "process exited during startup — check: omlxctl logs"
+            return 1
+        fi
+        [ "$(date +%s)" -ge "$deadline" ] && return 1
+        sleep 2
+    done
+}
+
+# --- Subcommands ------------------------------------------------------------
+cmd_start() {
+    _require_bootstrapped
+    if _is_running; then
+        skip "start" "${LABEL} already running"
+        if _health_ok; then
+            ok "ready" "server responding at ${HEALTH_URL}"
+        else
+            warn "ready" "running but ${HEALTH_URL} not yet responding"
+        fi
+        return 0
+    fi
+    info "Starting ${LABEL}"
+    if ! launchctl kickstart "$TARGET" 2>/dev/null; then
+        err "start" "launchctl kickstart failed"
+        return 1
+    fi
+    if _wait_ready; then
+        ok "start" "${LABEL} started and ready"
+    else
+        warn "start" "${LABEL} started but not ready within ${READY_TIMEOUT}s — check: omlxctl logs"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    _require_bootstrapped
+    if ! _is_running; then
+        skip "stop" "${LABEL} not running"
+        return 0
+    fi
+    info "Stopping ${LABEL} (SIGTERM; flushing hot cache to SSD)"
+    local rc=0
+    launchctl kill SIGTERM "$TARGET" 2>/dev/null || rc=$?
+    # exit 3 = "no process to signal" — it stopped between the check and the kill.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+        err "stop" "launchctl kill SIGTERM failed (exit ${rc})"
+        return 1
+    fi
+    local deadline=$(( $(date +%s) + STOP_TIMEOUT ))
+    while _is_running; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            warn "stop" "still running after ${STOP_TIMEOUT}s — escalating to SIGKILL"
+            launchctl kill SIGKILL "$TARGET" 2>/dev/null || true
+            sleep 2
+            break
+        fi
+        sleep 1
+    done
+    if _is_running; then
+        err "stop" "${LABEL} still running after SIGKILL — inspect: launchctl print ${TARGET}"
+        return 1
+    fi
+    ok "stop" "${LABEL} stopped — model memory released"
+}
+
+cmd_restart() {
+    _require_bootstrapped
+    info "Restarting ${LABEL}"
+    # kickstart -k SIGTERMs the running instance (if any) and starts a fresh one.
+    if ! launchctl kickstart -k "$TARGET" 2>/dev/null; then
+        err "restart" "launchctl kickstart -k failed"
+        return 1
+    fi
+    if _wait_ready; then
+        ok "restart" "${LABEL} restarted and ready"
+    else
+        warn "restart" "${LABEL} restarted but not ready within ${READY_TIMEOUT}s — check: omlxctl logs"
+        return 1
+    fi
+}
+
+cmd_status() {
+    if ! _is_bootstrapped; then
+        info "launchd:  NOT REGISTERED (no job in gui/${UID_VAL} — run setup-omlx-m5.sh or log in)"
+        return 0
+    fi
+    local out state pid
+    out="$(launchctl print "$TARGET" 2>/dev/null || true)"
+    state="$(printf '%s\n' "$out" | awk '/^[[:space:]]*state = /{sub(/.*state = /,""); print; exit}')"
+    pid="$(printf '%s\n'   "$out" | awk '/^[[:space:]]*pid = /{print $3; exit}')"
+    case "$state" in
+        running)     info "launchd:  running (pid ${pid:-?})" ;;
+        "")          info "launchd:  registered, stopped (waiting for: omlxctl start)" ;;
+        *)           info "launchd:  registered, state=${state}" ;;
+    esac
+    if [ "$state" = "running" ]; then
+        if ! _have_curl; then
+            info "health:   (curl not found — cannot probe ${HEALTH_URL})"
+        elif _health_ok; then
+            ok "ready" "responding at ${HEALTH_URL}"
+        else
+            warn "ready" "process up but ${HEALTH_URL} not responding (still loading the model?)"
+        fi
+    fi
+}
+
+cmd_logs() {
+    if [ ! -d "$LOG_DIR" ]; then
+        err "logs" "log directory not found: ${LOG_DIR}"
+        exit 2
+    fi
+    local found=false
+    if [ -f "$STDOUT_LOG" ]; then
+        info "stdout (${STDOUT_LOG}), last ${TAIL_LINES}:"
+        tail -n "$TAIL_LINES" "$STDOUT_LOG"; found=true
+    fi
+    if [ -f "$STDERR_LOG" ]; then
+        info "stderr (${STDERR_LOG}), last ${TAIL_LINES}:"
+        tail -n "$TAIL_LINES" "$STDERR_LOG"; found=true
+    fi
+    $found || warn "logs" "no log files in ${LOG_DIR} yet — start the server first"
+    info "Live tail: tail -f ${LOG_DIR}/launchagent.*.log"
+}
+
+usage() {
+    cat <<EOF
+Usage: omlxctl <start|stop|restart|status|logs>
+  start    Start the oMLX server on demand (idempotent); wait until ready
+  stop     Stop the server cleanly (SIGTERM, SIGKILL after ${STOP_TIMEOUT}s); release memory
+  restart  Restart the server; wait until ready
+  status   Show launchd registration/run state and /health readiness
+  logs     Show recent server log output
+EOF
+}
+
+case "${1:-}" in
+    start)     cmd_start   ;;
+    stop)      cmd_stop    ;;
+    restart)   cmd_restart ;;
+    status)    cmd_status  ;;
+    logs)      cmd_logs    ;;
+    -h|--help) usage; exit 0 ;;
+    "")        usage; exit 2 ;;
+    *)         err "omlxctl" "unknown subcommand: ${1}"; usage; exit 2 ;;
+esac
