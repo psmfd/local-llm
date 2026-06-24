@@ -12,13 +12,16 @@ requests that share long system prefixes, so **concurrent throughput and
 prefix-cache reuse matter more than single-stream tok/s**.
 
 The authoritative brief is [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md);
-the decision record is [`adrs/004-single-text-only-model-no-override.md`](adrs/004-single-text-only-model-no-override.md)
-(single text-only model, override retired), which supersedes
-[`adrs/003-vlm-engine-workaround-lineup.md`](adrs/003-vlm-engine-workaround-lineup.md)
-and, through it, [`adrs/002-qwen36-lineup-memory-guard.md`](adrs/002-qwen36-lineup-memory-guard.md)
+the current model-lineup decision is [`adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md`](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)
+(two co-resident pinned tiers + one on-demand max tier; stay on oMLX), which
+supersedes [`adrs/004-single-text-only-model-no-override.md`](adrs/004-single-text-only-model-no-override.md)
+and, through it, [`adrs/003-vlm-engine-workaround-lineup.md`](adrs/003-vlm-engine-workaround-lineup.md)
+and [`adrs/002-qwen36-lineup-memory-guard.md`](adrs/002-qwen36-lineup-memory-guard.md)
 (whose `--memory-guard-gb` migration, wired limit, and concurrency carry forward)
 and [`adrs/001-local-mlx-inference-omlx.md`](adrs/001-local-mlx-inference-omlx.md)
-(whose runtime choice carries forward).
+(whose oMLX runtime choice is reaffirmed by ADR-006). The full investigation —
+runtime reassessment, on-host bake-off, and tier selection — is in
+[`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md).
 `omlx-setup-prompt.md` is retained only as the historical source prompt; do not
 copy it forward as an additional source of truth.
 
@@ -43,9 +46,11 @@ omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + 
 ```
 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. Lint with the
-`linter` agent (shellcheck). The Metal wired-limit step needs `sudo`. Pinning +
-aliasing is **admin-panel only** at `http://localhost:8000/admin` — the script
-prints the manual steps; it cannot script them.
+`linter` agent (shellcheck). The Metal wired-limit step needs `sudo`. Aliases +
+pins are applied via the **oMLX admin API** (`apply_pins` briefly starts the
+server, PUTs each tier's settings, then stops it — `model_settings.json` is
+oMLX-owned, so the script never writes it directly); it degrades to printed
+manual admin-panel steps if the API can't be reached (ADR-006).
 
 Preflight hard-fails with exit `2` for non-macOS, non-arm64, RAM below ~120 GB,
 free disk below ~100 GB, or missing Homebrew. M5 Max is the tuned target; a
@@ -75,15 +80,20 @@ best-current-model review.
 
 - **Runtime:** oMLX via Homebrew —
   `brew tap jundot/omlx https://github.com/jundot/omlx && brew install omlx`
-- **Model (single, text-only):** Qwen3-Coder-30B-A3B-Instruct at 8-bit MLX
-  (`lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`; `Qwen3MoeForCausalLM`,
-  MoE ~3B active → fast decode under the 614 GB/s bandwidth cap; 8-bit preserves
-  tool-call JSON fidelity; 262,144-token native context, `rope_scaling` null).
-  ~32 GB resident. Pin + alias as `coding-fast`. **No engine override:** it is
-  verified text-only, so oMLX routes it to the batched LLM engine and it is
-  concurrency-safe as-is (ADR-004). A single resident model keeps the whole
-  KV/prefix-cache budget free for the fan-out — dropping a co-resident second
-  model is the deliberate reason there is only one (ADR-004).
+- **Models (three tiers, all text-only; ADR-006):** every tier is a verified
+  text-only coder build (`*ForCausalLM`, no `vision_config`) and tool-call-verified
+  on oMLX, so each routes to the batched LLM engine with **no engine override**.
+  - **T1 `coding-fast`** — `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`
+    (`Qwen3MoeForCausalLM`, MoE ~3B active, 262K ctx). ~30.6 GB. **Pinned, co-resident.**
+  - **T2 `coding-balanced`** — `mlx-community/GLM-4.7-Flash-8bit`
+    (`Glm4MoeLiteForCausalLM`, MoE ~3B active, 202K ctx). ~30 GB. **Pinned, co-resident.**
+  - **MAX `coding-quality`** — `lmstudio-community/Qwen3-Coder-Next-MLX-4bit`
+    (`Qwen3NextForCausalLM`, 80B/~3B active, ~71% SWE-bench). ~45 GB. **On-demand**
+    (lazy-loads ~16 s on first request, idle-evicts; NOT pinned — it does not
+    co-reside alongside T1+T2 under the wired ceiling).
+  T1+T2 stay co-resident (~60 GB) leaving ~29 GB for KV/prefix cache under the
+  96 GB wired ceiling, so the fan-out never pays a swap cost. DFlash SSD cache is
+  disabled on every tier (oMLX #702/#1892).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
   `--paged-ssd-cache-dir ~/.omlx/cache`, `--hot-cache-max-size 18GB` (oMLX accepts
@@ -107,9 +117,11 @@ best-current-model review.
   creates `~/models`, `~/.omlx/{cache,logs,bin}`; generates the 0600 API key;
   sets + persists the wired limit; installs the start wrapper + LaunchAgent (on-
   demand, RunAtLoad=false) + the `omlxctl` control tool (symlinked onto PATH when
-  the brew bin is writable); **model download is opt-in (default off)**; leaves the
-  server stopped; `--configure-pi` registers the provider with the Pi coding agent.
-  No engine override step — the model is text-only (ADR-004).
+  the brew bin is writable); downloads the three tiers when **download is opt-in
+  (default off)**, skipping any already present (upgrade-safe); applies aliases +
+  pins via the admin API (`apply_pins`, start→pin→stop) and leaves the server
+  stopped; `--configure-pi` registers the provider with the Pi coding agent.
+  No engine override step — all tiers are text-only (ADR-006).
 - `templates/` — committed templates the script installs with placeholder
   substitution: `omlx-start-wrapper.sh`, the `com.local.omlx.plist` LaunchAgent,
   the `com.local.iogpu-wired-limit.plist` root LaunchDaemon, `omlxctl` (the
@@ -119,11 +131,13 @@ best-current-model review.
   repository-resident `omlx-expert` domain agent (oMLX runtime + MLX model
   selection + Apple-Silicon memory tuning), read-only/advisory, in both Claude
   Code and GitHub Copilot wrapper formats. Keep the two wrappers in sync.
-- `adrs/` — `004-single-text-only-model-no-override.md` records the current model
-  convention (superseding `003`, which superseded `002`, which superseded `001`);
-  `005-on-demand-service-lifecycle.md` records the on-demand start/stop lifecycle
-  (no login autostart) — additive, not a supersession of `004`; `TEMPLATE.md` is the
-  MADR minimal template for new ADRs (sequential, zero-padded three digits).
+- `adrs/` — `006-multi-tier-coresident-lineup-stay-on-omlx.md` records the current
+  model lineup (superseding `004`, which superseded `003` → `002` → `001`; the
+  `--memory-guard-gb`/wired-limit/concurrency from `002` and the oMLX runtime from
+  `001` carry forward); `005-on-demand-service-lifecycle.md` records the on-demand
+  start/stop lifecycle (no login autostart) — additive, still in force under `006`;
+  `TEMPLATE.md` is the MADR minimal template for new ADRs (sequential, zero-padded
+  three digits). The decision rationale lives in `docs/runtime-tiering-research.md`.
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
   `FallbackInferenceRouter`.
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
@@ -171,9 +185,10 @@ After the server is up, validate against `http://localhost:8000/v1` (the script'
 5. A `POST /v1/messages` call confirming the Anthropic-style endpoint is reachable.
 
 Anthropic-style clients use `/v1/messages`. The downstream consumer is an
-`IInferenceBackend` / `FallbackInferenceRouter`: `coding-fast` → this local model;
-the `coding-quality` role has no local model and falls through to a remote backend
-(see `docs/router-wiring.md`).
+`IInferenceBackend` / `FallbackInferenceRouter`: `coding-fast` and `coding-balanced`
+→ co-resident local models; `coding-quality` → the local on-demand max tier
+(Qwen3-Coder-Next, lazy-loaded), with a remote backend as fallback (see
+`docs/router-wiring.md`).
 
 ## Teardown
 
@@ -193,9 +208,11 @@ sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 # 3. Uninstall oMLX
 brew uninstall omlx && brew untap jundot/omlx
 
-# 4. Remove data (the API key + cache/logs, and the model)
+# 4. Remove data (the API key + cache/logs, and the three model tiers)
 rm -rf ~/.omlx          # includes the 0600 api-key
-rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit
+rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
+       ~/models/GLM-4.7-Flash-8bit \
+       ~/models/Qwen3-Coder-Next-MLX-4bit
 ```
 
 ## Scripts

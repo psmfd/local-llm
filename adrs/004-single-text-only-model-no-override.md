@@ -1,6 +1,6 @@
 # ADR-004: Drop to a single text-only model; retire the VLM engine override
 
-- Status: accepted
+- Status: superseded by [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md)
 - Date: 2026-06-22
 
 Supersedes [ADR-003](003-vlm-engine-workaround-lineup.md) for the model lineup
