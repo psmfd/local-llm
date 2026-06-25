@@ -12,7 +12,9 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the model (~32 GB) via `hf download`. Off by default.
+#   --download-model   Download the three model tiers (~105 GB total) via
+#                      `hf download`. Off by default. Existing models are skipped,
+#                      so this is safe to re-run when upgrading.
 #   --configure-pi     Register the oMLX provider with the Pi coding agent.
 #                      Auto-writes ~/.pi/agent/models.json ONLY when its
 #                      providers object is empty (backup taken first);
@@ -76,17 +78,35 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=100         # ~32 GB model plus paged-SSD cache headroom (ADR-004)
+MIN_DISK_GB=140         # T1+T2 (~60 GB) + on-demand MAX (~45 GB) + paged-SSD cache headroom (ADR-006)
 
-# Repo ID verified against the HuggingFace config.json on 2026-06-22 (ADR-004).
-# Re-probed before every download, but still confirm the best current model before
-# large downloads. The model is a verified text-only coder build
-# (Qwen3MoeForCausalLM, no vision_config) → it routes to oMLX's batched LLM engine
-# and is concurrency-safe with NO engine override. A single resident model keeps
-# the whole KV/prefix-cache budget under the wired ceiling for the fan-out.
-PRIMARY_REPO="lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
-PRIMARY_DIR="$MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
+# --- Model tiers (ADR-006) --------------------------------------------------
+# Three tiers, all verified TEXT-ONLY MLX coder builds (no vision_config → batched
+# LLM engine, concurrency-safe, no engine override) and tool-call-verified on oMLX:
+#   T1  coding-fast     Qwen3-Coder-30B-A3B-8bit   (~30.6 GB)  PINNED, co-resident
+#   T2  coding-balanced GLM-4.7-Flash-8bit         (~30 GB)    PINNED, co-resident
+#   MAX coding-quality  Qwen3-Coder-Next-4bit      (~45 GB)    on-demand (lazy-load, NOT pinned)
+# T1+T2 stay co-resident under the 96 GB wired ceiling with KV headroom; MAX is
+# lazy-loaded on first request and TTL-evicts when idle (never co-resident — it
+# does not fit alongside T1+T2). Repo IDs verified against HuggingFace config.json
+# on 2026-06-24; re-probed before each download. Confirm the best current models
+# before large downloads. See docs/runtime-tiering-research.md.
+#
+# Each TIER_MODELS entry is "repo|alias|pinned(true|false)" — order is T1, T2, MAX.
+# Bash-3.2-safe indexed array (macOS default shell).
+TIER_MODELS=(
+    "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast|true"
+    "mlx-community/GLM-4.7-Flash-8bit|coding-balanced|true"
+    "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality|false"
+)
+# T1's alias drives the detailed validation probes below (chat/tool/concurrency).
 PRIMARY_ALIAS="coding-fast"
+
+# Field accessors for a TIER_MODELS entry (split on '|').
+tier_repo()  { printf '%s' "${1%%|*}"; }
+tier_alias() { local r="${1#*|}"; printf '%s' "${r%%|*}"; }
+tier_pin()   { printf '%s' "${1##*|}"; }
+tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 
 # Pi coding-agent provider registration (--configure-pi). contextWindow is half
 # the model's 262144-token native context (verified config.json, rope_scaling
@@ -566,7 +586,13 @@ maybe_download_models() {
         skip "model" "download is opt-in — re-run with --download-model, or use the /admin downloader (verify the exact quant tags first)"
         return
     fi
-    download_model "$PRIMARY_REPO" "$PRIMARY_DIR" "model"
+    # All three ADR-006 tiers. download_model() skips any dir that is already
+    # populated, so on an upgrade from a single-model (ADR-004) install only the
+    # missing tiers are fetched.
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        download_model "$(tier_repo "$entry")" "$(tier_dir "$entry")" "model-$(tier_alias "$entry")"
+    done
 }
 
 # --- Step: Pi coding-agent provider registration (--configure-pi) -----------
@@ -576,11 +602,14 @@ maybe_download_models() {
 # parse shows an empty providers object (backup taken first; git covers the
 # rest). Anything else gets the rendered snippet plus manual merge steps.
 print_pi_settings_instructions() {
-    local settings_file="$1" primary_id="$2"
+    local settings_file="$1"
     # settings.json is hand-curated and git-tracked; never edited automatically.
-    info "To surface the model in Pi's picker, add to the enabledModels array in $settings_file:"
-    echo "      \"omlx/${primary_id}\""
-    echo "      Select with: pi --model omlx/${primary_id}  (or /model in a session — models.json reloads on /model)"
+    info "To surface the tiers in Pi's picker, add to the enabledModels array in $settings_file:"
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        echo "      \"omlx/$(tier_alias "$entry")\""
+    done
+    echo "      Select with: pi --model omlx/$(tier_alias "${TIER_MODELS[0]}")  (or /model in a session — models.json reloads on /model)"
 }
 
 configure_pi_provider() {
@@ -598,13 +627,18 @@ configure_pi_provider() {
     local models_file="$PI_AGENT_DIR/models.json"
     local settings_file="$PI_AGENT_DIR/settings.json"
     local snippet_dest="$OMLX_HOME/pi-provider-snippet.json"
-    local primary_id
-    primary_id="$(basename "$PRIMARY_DIR")"
+    # Register the tiers by their oMLX aliases (ADR-006).
+    local t1_id t2_id max_id
+    t1_id="$(tier_alias "${TIER_MODELS[0]}")"
+    t2_id="$(tier_alias "${TIER_MODELS[1]}")"
+    max_id="$(tier_alias "${TIER_MODELS[2]}")"
 
     if render_template "$TEMPLATE_DIR/pi-models-omlx.json" "$snippet_dest" \
         "__PORT__"              "$PORT" \
         "__API_KEY_FILE__"      "$API_KEY_FILE" \
-        "__PRIMARY_ID__"        "$primary_id" \
+        "__T1_ID__"             "$t1_id" \
+        "__T2_ID__"             "$t2_id" \
+        "__MAX_ID__"            "$max_id" \
         "__PI_CONTEXT_WINDOW__" "$PI_CONTEXT_WINDOW" \
         "__PI_MAX_TOKENS__"     "$PI_MAX_TOKENS"; then
         ok "pi-config" "rendered provider snippet: $snippet_dest"
@@ -618,7 +652,7 @@ configure_pi_provider() {
     # Idempotency: never rewrite a models.json that already names this provider.
     if [ -f "$models_file" ] && grep -q '"omlx"' "$models_file"; then
         skip "pi-config" "\"omlx\" provider already present in $models_file (left untouched)"
-        print_pi_settings_instructions "$settings_file" "$primary_id"
+        print_pi_settings_instructions "$settings_file"
         return
     fi
 
@@ -658,18 +692,147 @@ PYEOF
         info "Insert the \"omlx\" block from $snippet_dest into the providers object of $models_file"
     fi
 
-    print_pi_settings_instructions "$settings_file" "$primary_id"
+    print_pi_settings_instructions "$settings_file"
 }
 
-# --- Pin/alias instructions (GUI-only; cannot be scripted) ------------------
+# --- Pin/alias fallback instructions (when the admin API can't be reached) --
 print_pin_instructions() {
-    # Printed unconditionally (not via detail/--verbose): pinning is GUI-only and
-    # cannot be scripted, so these are required manual steps, not optional detail.
-    info "Model pin + alias is admin-panel only (not a CLI flag). Manual steps:"
+    # Printed when apply_pins cannot reach the admin API. Lists every tier so the
+    # operator can set aliases + pins manually in the admin panel.
+    info "Apply model aliases + pins manually in the admin panel:"
     echo "      1. Start the server (omlxctl start), then open http://localhost:${PORT}/admin"
-    echo "      2. Under Models, set the alias for $(basename "$PRIMARY_DIR") to '${PRIMARY_ALIAS}' and PIN it (keeps it resident)."
-    echo "      The alias persists in ${OMLX_HOME}/settings.json and appears in GET /v1/models."
-    echo "      No engine override is needed — the model is text-only (Qwen3MoeForCausalLM); ADR-004."
+    echo "      2. Under Models, for each tier set the alias and pin state:"
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        if [ "$(tier_pin "$entry")" = "true" ]; then
+            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  PIN (keep co-resident)"
+        else
+            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  do NOT pin (on-demand; set idle TTL if desired)"
+        fi
+    done
+    echo "      Aliases/pins persist in ${OMLX_HOME}/model_settings.json and appear in GET /v1/models."
+    echo "      No engine override is needed — all tiers are text-only coder builds (ADR-006)."
+}
+
+# Idempotency gate: returns 0 if model_settings.json already has every tier's
+# alias and pin state. We only READ the oMLX-owned file here. Lets a re-run skip
+# the whole start/pin/stop cycle (no server churn) — key for upgrade re-runs.
+pins_already_applied() {
+    [ -f "$OMLX_HOME/model_settings.json" ] || return 1
+    python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null
+import json, os, sys
+try:
+    models = json.load(open(sys.argv[1])).get("models", {})
+except Exception:
+    sys.exit(1)
+for t in sys.argv[2:]:
+    repo, alias, pin = t.split("|")
+    m = models.get(os.path.basename(repo))
+    if not m or m.get("model_alias") != alias or bool(m.get("is_pinned")) != (pin == "true"):
+        sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
+# --- Pin/alias via the oMLX admin API (ADR-006) -----------------------------
+# Sets each tier's alias + pin state by briefly starting the server, PUTting the
+# per-model settings, then stopping it — so ADR-005's end-state invariant (server
+# stopped after setup, no login autostart) is preserved. model_settings.json is
+# oMLX-owned, so we go through the admin API rather than writing the file. The
+# admin mount prefix is probed (it has drifted between /admin/api and /api). The
+# whole step degrades to print_pin_instructions + a warning — never a hard failure.
+apply_pins() {
+    if ! $OMLX_PRESENT; then
+        record_warn "pin" "omlx not installed — skipping admin pinning; re-run after installing omlx"
+        print_pin_instructions; return
+    fi
+    if [ ! -r "$API_KEY_FILE" ]; then
+        record_warn "pin" "API key not readable — skipping admin pinning"
+        print_pin_instructions; return
+    fi
+    local any_present=false entry
+    for entry in "${TIER_MODELS[@]}"; do
+        if [ -d "$(tier_dir "$entry")" ] && [ -n "$(ls -A "$(tier_dir "$entry")" 2>/dev/null)" ]; then any_present=true; fi
+    done
+    if ! $any_present; then
+        skip "pin" "no tier models on disk yet — download them (--download-model), then re-run to apply pins"
+        print_pin_instructions; return
+    fi
+    if pins_already_applied; then
+        skip "pin" "all tier aliases + pins already set in model_settings.json (no server start needed)"
+        return
+    fi
+
+    local key base auth
+    key="$(cat "$API_KEY_FILE")"
+    base="http://localhost:${PORT}"
+    auth="Authorization: Bearer ${key}"
+
+    # Only stop the server afterwards if WE started it (respect an already-running server).
+    local started_by_us=false
+    if ! curl -fsS --max-time 3 -H "$auth" "${base}/health" >/dev/null 2>&1; then
+        info "Briefly starting the server to apply pins (will stop it afterwards)"
+        if [ -x "$CONTROL_PATH" ] && "$CONTROL_PATH" start >/dev/null 2>&1; then
+            started_by_us=true
+        else
+            record_warn "pin" "could not start the server to apply pins (omlxctl start failed)"
+            print_pin_instructions; return
+        fi
+    fi
+
+    local ready=false
+    for _ in $(seq 1 60); do
+        if curl -fsS --max-time 3 -H "$auth" "${base}/health" >/dev/null 2>&1; then ready=true; break; fi
+        sleep 2
+    done
+    if ! $ready; then
+        record_warn "pin" "server did not become ready — skipping admin pinning"
+        $started_by_us && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
+        print_pin_instructions; return
+    fi
+
+    # Probe the admin mount prefix.
+    local admin="" p
+    for p in "/admin/api" "/api"; do
+        if curl -fsS --max-time 5 -H "$auth" "${base}${p}/models" >/dev/null 2>&1; then admin="$p"; break; fi
+    done
+    if [ -z "$admin" ]; then
+        record_warn "pin" "admin API not found at /admin/api or /api — apply pins manually"
+        $started_by_us && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
+        print_pin_instructions; return
+    fi
+    detail "admin API mounted at ${admin}"
+
+    local mid alias pin body
+    for entry in "${TIER_MODELS[@]}"; do
+        mid="$(basename "$(tier_repo "$entry")")"
+        alias="$(tier_alias "$entry")"
+        pin="$(tier_pin "$entry")"
+        if [ ! -d "$(tier_dir "$entry")" ]; then skip "pin-${alias}" "model ${mid} not on disk — skipping"; continue; fi
+        # PINNED tiers (T1/T2): co-resident, DFlash off. MAX tier: not pinned,
+        # idle-evict after 15 min, DFlash off (oMLX #702/#1892).
+        if [ "$pin" = "true" ]; then
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"dflash_ssd_cache\":false}"
+        else
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+        fi
+        if curl -fsS --max-time 20 -X PUT -H "$auth" -H 'Content-Type: application/json' \
+            -d "$body" "${base}${admin}/models/${mid}/settings" >/dev/null 2>&1; then
+            ok "pin-${alias}" "alias '${alias}' (pinned=${pin}) set for ${mid}"
+        else
+            record_warn "pin-${alias}" "admin PUT failed for ${mid} — set alias/pin manually at ${base}/admin"
+        fi
+    done
+
+    if $started_by_us; then
+        if "$CONTROL_PATH" stop >/dev/null 2>&1; then
+            ok "pin" "pins applied; server stopped (on-demand end-state restored)"
+        else
+            record_warn "pin" "pins applied but failed to stop the server — run: omlxctl stop"
+        fi
+    else
+        ok "pin" "pins applied against the already-running server (left running)"
+    fi
 }
 
 # --- Validation -------------------------------------------------------------
@@ -687,11 +850,17 @@ validate_endpoint() {
     if models="$(curl -fsS -H "$auth" "${base}/models" 2>/dev/null)"; then
         ok "validate-models" "GET /v1/models reachable"
         detail "$models"
-        if echo "$models" | grep -q "$PRIMARY_ALIAS"; then
-            ok "validate-alias" "alias '${PRIMARY_ALIAS}' present"
-        else
-            record_warn "validate-alias" "alias '${PRIMARY_ALIAS}' not found — pin it in /admin"
-        fi
+        # Every tier alias should be registered. The MAX tier (coding-quality) is
+        # on-demand: it is listed once discovered, but only loads on first request.
+        local entry valias
+        for entry in "${TIER_MODELS[@]}"; do
+            valias="$(tier_alias "$entry")"
+            if echo "$models" | grep -q "$valias"; then
+                ok "validate-alias" "alias '${valias}' present"
+            else
+                record_warn "validate-alias" "alias '${valias}' not found — apply pins (re-run setup) or set it in /admin"
+            fi
+        done
     else
         record_err "validate-models" "GET /v1/models failed — is the server running? (launchctl print gui/$(id -u)/${AGENT_LABEL})"
         return
@@ -782,7 +951,7 @@ main() {
     else
         skip "pi-config" "Pi provider registration is opt-in — re-run with --configure-pi"
     fi
-    print_pin_instructions
+    apply_pins
 
     info "The server is installed but NOT running (startup is intentional)."
     info "Start it on demand:  omlxctl start    (stop: omlxctl stop, status: omlxctl status)"
