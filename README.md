@@ -80,6 +80,7 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 | [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md) | The authoritative implementation brief |
 | [`adrs/`](adrs/) | Decision records — current model lineup is [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) (two co-resident pinned tiers + one on-demand max tier, stay on oMLX; supersedes [ADR-004](adrs/004-single-text-only-model-no-override.md)) and [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart) |
 | `.claude/agents/`, `.github/agents/` | Repository-resident `omlx-expert` domain agent (read-only/advisory) for Claude Code and GitHub Copilot |
+| [`.github/workflows/`](.github/workflows/) | CI lint gate — `validate` (shellcheck + markdownlint + plist well-formedness) and `lint-pr-title` (Conventional Commits), required checks on the branch rulesets ([ADR-007](adrs/007-ci-rulesets-and-release-strategy.md)) |
 | [`docs/router-wiring.md`](docs/router-wiring.md) | Wiring the server into a .NET `IInferenceBackend` / `FallbackInferenceRouter` |
 | [`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md) | Research note behind [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) — runtime reassessment, on-host bake-off, and tier selection |
 | [`omlx-setup-prompt.md`](omlx-setup-prompt.md) | Historical source prompt only — not a source of truth |

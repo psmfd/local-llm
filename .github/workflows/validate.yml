@@ -1,0 +1,54 @@
+name: validate
+
+# Lint gate for the provisioning repo. Runs on PRs targeting dev and main, and
+# on pushes to those branches. The job is named `validate` and is wired as a
+# required status check on both the protect-dev and protect-main rulesets — do
+# NOT rename the job without updating those rulesets (the check context is the
+# job name). See adrs/007-ci-rulesets-and-release-strategy.md.
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest pre-installs shellcheck. Explicit file list: it covers the
+      # extensionless templates/omlxctl (dialect auto-detected from its bash
+      # shebang) without a find-by-shebang sweep that could pick up new files.
+      - name: Shell lint (shellcheck)
+        run: shellcheck setup-omlx-m5.sh templates/omlx-start-wrapper.sh templates/omlxctl
+
+      # Config (.markdownlint-cli2.jsonc) is auto-discovered from the repo root.
+      - name: Markdown lint (markdownlint-cli2)
+        uses: DavidAnson/markdownlint-cli2-action@v23
+        with:
+          globs: "**/*.md"
+
+      # plutil is macOS-only and unavailable on ubuntu runners; python3's stdlib
+      # ElementTree gives a portable XML well-formedness check for the plists.
+      # templates/pi-models-omlx.json is a JSONC template with __PLACEHOLDER__
+      # tokens — not parseable as JSON, so it is intentionally not validated here.
+      - name: Plist XML validation (well-formedness)
+        run: |
+          python3 - templates/com.local.omlx.plist templates/com.local.iogpu-wired-limit.plist <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          ok = True
+          for f in sys.argv[1:]:
+              try:
+                  ET.parse(f)
+                  print(f"OK    [plist] {f}")
+              except Exception as e:
+                  print(f"ERROR [plist] {f}: {e}", file=sys.stderr)
+                  ok = False
+          sys.exit(0 if ok else 1)
+          EOF

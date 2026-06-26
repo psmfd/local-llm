@@ -1,0 +1,24 @@
+name: lint-pr-title
+
+# Enforces a Conventional Commits PR title. In the squash-merge flow the PR
+# title becomes the commit message on dev, so this gates commit hygiene at the
+# source. The job is named `lint-pr-title` and is a required status check on the
+# protect-dev ruleset — do NOT rename it without updating that ruleset.
+
+on:
+  pull_request:
+    branches: [dev, main]
+    # `edited` is required so a title corrected after open is re-checked.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-pr-title:
+    name: lint-pr-title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

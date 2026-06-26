@@ -131,13 +131,20 @@ best-current-model review.
   repository-resident `omlx-expert` domain agent (oMLX runtime + MLX model
   selection + Apple-Silicon memory tuning), read-only/advisory, in both Claude
   Code and GitHub Copilot wrapper formats. Keep the two wrappers in sync.
+- `.github/workflows/` — CI lint gate (`validate.yml`: shellcheck + markdownlint +
+  plist well-formedness; `lint-pr-title.yml`: Conventional Commits PR title). The
+  `validate` and `lint-pr-title` job names are required-check contexts on the
+  `protect-dev`/`protect-main` rulesets — renaming a job breaks its ruleset binding
+  (`007`). `.markdownlint-cli2.jsonc` (repo root) configures the markdown step.
 - `adrs/` — `006-multi-tier-coresident-lineup-stay-on-omlx.md` records the current
   model lineup (superseding `004`, which superseded `003` → `002` → `001`; the
   `--memory-guard-gb`/wired-limit/concurrency from `002` and the oMLX runtime from
   `001` carry forward); `005-on-demand-service-lifecycle.md` records the on-demand
   start/stop lifecycle (no login autostart) — additive, still in force under `006`;
-  `TEMPLATE.md` is the MADR minimal template for new ADRs (sequential, zero-padded
-  three digits). The decision rationale lives in `docs/runtime-tiering-research.md`.
+  `007-ci-rulesets-and-release-strategy.md` records the CI gate, branch-protection
+  rulesets, and the deferred-`semantic-release` decision; `TEMPLATE.md` is the MADR
+  minimal template for new ADRs (sequential, zero-padded three digits). The model
+  decision rationale lives in `docs/runtime-tiering-research.md`.
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
   `FallbackInferenceRouter`.
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
