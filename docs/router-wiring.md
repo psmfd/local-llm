@@ -1,17 +1,21 @@
 # Wiring oMLX into the .NET `IInferenceBackend` / `FallbackInferenceRouter`
 
 This note shows how to register the local oMLX server as one `IInferenceBackend`
-behind your `FallbackInferenceRouter`, routing `coding-fast` (primary) →
-oMLX and falling through to a remote backend on failure or saturation.
+behind your `FallbackInferenceRouter`, routing the three local tiers
+(`coding-fast`, `coding-balanced`, `coding-quality`) → oMLX and falling through to
+a remote backend on failure or saturation.
 
 - **Endpoint:** `http://localhost:8000/v1` (OpenAI-style `POST /v1/chat/completions`).
   oMLX also serves Anthropic-style `POST /v1/messages`; this note uses the
   OpenAI chat-completions shape.
 - **Auth:** bearer key read once at startup from `OMLX_API_KEY`, else from the
   0600 file `~/.omlx/api-key`. **Never hardcode the key.**
-- **Aliases:** the `model` field carries the oMLX alias — `coding-fast`
-  (primary) or `coding-quality` (secondary). Aliases are set in the `/admin` panel
-  (see [ADR-002](../adrs/002-qwen36-lineup-memory-guard.md)).
+- **Aliases:** the `model` field carries the oMLX alias. This host serves three
+  tiers ([ADR-006](../adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)):
+  `coding-fast` + `coding-balanced` are pinned co-resident; `coding-quality` is the
+  **on-demand** max tier (Qwen3-Coder-Next, lazy-loaded ~16 s on first request).
+  Keep a remote backend as the fallback after the local tiers. Aliases/pins are
+  applied by `setup-omlx-m5.sh` via the admin API.
 - **Concurrency:** typed `HttpClient` via `IHttpClientFactory` +
   `AddStandardResilienceHandler` so a local hiccup degrades into the fallback
   router rather than throwing.
@@ -25,7 +29,7 @@ oMLX and falling through to a remote backend on failure or saturation.
 ## Assumed contract
 
 ```csharp
-public enum ModelRole { Fast, Quality }
+public enum ModelRole { Fast, Balanced, Quality }
 public sealed record ChatMessage(string Role, string Content);
 public sealed record InferenceRequest(ModelRole Role, IReadOnlyList<ChatMessage> Messages, float? Temperature = null);
 public sealed record InferenceResponse(string Content, bool IsAvailable);
@@ -103,8 +107,9 @@ public sealed class OmlxInferenceBackend(HttpClient httpClient, ILogger<OmlxInfe
     // Logical role → oMLX model alias (the "model" field).
     private static readonly Dictionary<ModelRole, string> ModelAliases = new()
     {
-        [ModelRole.Fast]    = "coding-fast",
-        [ModelRole.Quality] = "coding-quality",
+        [ModelRole.Fast]     = "coding-fast",
+        [ModelRole.Balanced] = "coding-balanced",
+        [ModelRole.Quality]  = "coding-quality",   // on-demand: first call lazy-loads (~16 s)
     };
 
     // No global DefaultIgnoreCondition: the property-level [JsonIgnore] on the
@@ -228,10 +233,13 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 - **Order = priority.** Register oMLX first; the router iterates registration
   order, so the local backend is primary for every role. It catches
   `InferenceUnavailableException` and advances to the next backend.
-- **Role routing.** Both roles map through the alias dictionary. If `coding-quality`
-  is not installed, oMLX errors for that model → wrapped as
-  `InferenceUnavailableException` → fallback. No startup "is it installed?" check
-  needed.
+- **Role routing.** All three roles map through the alias dictionary to local oMLX
+  tiers (ADR-006). `coding-fast` and `coding-balanced` are pinned co-resident, so
+  they answer immediately. `coding-quality` (Qwen3-Coder-Next) is **on-demand**:
+  oMLX lazy-loads it on the first request (~16 s), so that call is slow — size the
+  resilience `AttemptTimeout` to tolerate it, or pre-warm with a throwaway request.
+  If a tier ever errors (e.g. transient load failure) it is wrapped as
+  `InferenceUnavailableException` → fallback to the next backend.
 - **Saturation.** oMLX runs at `--max-concurrent-requests 16`; a 429 trips the
   circuit breaker, diverting traffic to the remote backend until it recovers.
 

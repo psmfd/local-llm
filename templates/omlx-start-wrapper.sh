@@ -2,9 +2,10 @@
 # omlx-start-wrapper.sh — start the tuned oMLX inference server under launchd.
 #
 # Installed by setup-omlx-m5.sh (placeholders substituted at install time). The
-# LaunchAgent (com.local.omlx.plist) exec's this script at login. We use a wrapper
-# rather than `brew services` because brew services starts omlx with zero-config
-# defaults and would not carry the tuned serving flags below.
+# LaunchAgent (com.local.omlx.plist) exec's this script on demand — when the user
+# runs `omlxctl start` (launchctl kickstart), NOT at login (RunAtLoad=false). We
+# use a wrapper rather than `brew services` because brew services starts omlx with
+# zero-config defaults and would not carry the tuned serving flags below.
 #
 # Placeholders substituted at install time:
 #   __BREW_PREFIX__    Homebrew prefix (e.g. /opt/homebrew)
@@ -14,8 +15,9 @@
 #   __WIRED_MIN_MB__   minimum acceptable iogpu.wired_limit_mb (sanity threshold)
 #
 # launchd does not source shell profiles and provides only a minimal PATH, so we
-# set PATH explicitly and `exec` the server (launchd tracks the direct child PID;
-# backgrounding would break KeepAlive).
+# set PATH explicitly and `exec` the server so launchd supervises the server
+# process directly (its PID is what `launchctl kill`/`print` act on; backgrounding
+# would detach that PID and break omlxctl stop/status).
 
 set -euo pipefail
 
@@ -58,9 +60,9 @@ fi
 # saturation surfaces as server-level backpressure, not Metal wiring failures. It
 # replaced the removed --max-process-memory flag (ADR-002); per oMLX #702 it
 # monitors Metal allocations, not total RSS.
-# --hot-cache-max-size takes an absolute size only ('8GB' style) — parse_size in
-# 0.4.4rc1 rejects percentages, crash-looping the agent. 18GB ≈ the original
-# 20%-of-guard intent.
+# --hot-cache-max-size accepts both absolute sizes ('18GB') and percentages
+# ('20%'). We pin an absolute 18GB for a deterministic hot-cache footprint
+# independent of how oMLX resolves a percentage (≈ 20% of the 90 GB guard).
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \

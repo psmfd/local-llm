@@ -12,9 +12,9 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the PRIMARY model (~38 GB) via `hf download`.
-#   --with-secondary   Also download the SECONDARY model (~30 GB). Implies
-#                      --download-model. Off by default.
+#   --download-model   Download the three model tiers (~105 GB total) via
+#                      `hf download`. Off by default. Existing models are skipped,
+#                      so this is safe to re-run when upgrading.
 #   --configure-pi     Register the oMLX provider with the Pi coding agent.
 #                      Auto-writes ~/.pi/agent/models.json ONLY when its
 #                      providers object is empty (backup taken first);
@@ -32,6 +32,11 @@
 #   1  One or more errors occurred.
 #   2  Environment or precondition failure (wrong OS/arch, insufficient
 #      RAM/disk, Homebrew missing, etc.).
+#
+# The server is on-demand: setup does NOT start it and it does NOT start at login
+# (the LaunchAgent is RunAtLoad=false). Start/stop it intentionally with the
+# installed `omlxctl` tool: `omlxctl start | stop | restart | status | logs`
+# (ADR-005).
 #
 # NOTE: oMLX's exact CLI surface and the model repo IDs were verified against
 # live sources at authoring time but may drift. The script and the start wrapper
@@ -73,24 +78,40 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=100         # ~61 GB of models plus paged-SSD cache headroom (ADR-002)
+MIN_DISK_GB=140         # T1+T2 (~60 GB) + on-demand MAX (~45 GB) + paged-SSD cache headroom (ADR-006)
 
-# Repo IDs verified against the HuggingFace API on 2026-06-11 (ADR-003). Re-probed
-# before every download, but still confirm the best current model before large
-# downloads. The primary checkpoint carries a vision_config, so oMLX would route
-# it to the VLM engine, which crashes under concurrent requests (oMLX #1800) —
-# apply_model_override forces it onto the batched LLM engine. The secondary is a
-# verified text-only coder build and is concurrency-safe without an override.
-PRIMARY_REPO="mlx-community/Qwen3.6-35B-A3B-8bit"
-PRIMARY_DIR="$MODELS_DIR/Qwen3.6-35B-A3B-8bit"
+# --- Model tiers (ADR-006) --------------------------------------------------
+# Three tiers, all verified TEXT-ONLY MLX coder builds (no vision_config → batched
+# LLM engine, concurrency-safe, no engine override) and tool-call-verified on oMLX:
+#   T1  coding-fast     Qwen3-Coder-30B-A3B-8bit   (~30.6 GB)  PINNED, co-resident
+#   T2  coding-balanced GLM-4.7-Flash-8bit         (~30 GB)    PINNED, co-resident
+#   MAX coding-quality  Qwen3-Coder-Next-4bit      (~45 GB)    on-demand (lazy-load, NOT pinned)
+# T1+T2 stay co-resident under the 96 GB wired ceiling with KV headroom; MAX is
+# lazy-loaded on first request and TTL-evicts when idle (never co-resident — it
+# does not fit alongside T1+T2). Repo IDs verified against HuggingFace config.json
+# on 2026-06-24; re-probed before each download. Confirm the best current models
+# before large downloads. See docs/runtime-tiering-research.md.
+#
+# Each TIER_MODELS entry is "repo|alias|pinned(true|false)" — order is T1, T2, MAX.
+# Bash-3.2-safe indexed array (macOS default shell).
+TIER_MODELS=(
+    "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast|true"
+    "mlx-community/GLM-4.7-Flash-8bit|coding-balanced|true"
+    "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality|false"
+)
+# T1's alias drives the detailed validation probes below (chat/tool/concurrency).
 PRIMARY_ALIAS="coding-fast"
-SECONDARY_REPO="lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
-SECONDARY_DIR="$MODELS_DIR/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit"
-SECONDARY_ALIAS="coding-quality"
+
+# Field accessors for a TIER_MODELS entry (split on '|').
+tier_repo()  { printf '%s' "${1%%|*}"; }
+tier_alias() { local r="${1#*|}"; printf '%s' "${r%%|*}"; }
+tier_pin()   { printf '%s' "${1##*|}"; }
+tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 
 # Pi coding-agent provider registration (--configure-pi). contextWindow is half
-# the primary's 262K native context: 16 concurrent sessions at full context
-# would overrun the KV/wired budget and collapse prefix-cache reuse (ADR-003).
+# the model's 262144-token native context (verified config.json, rope_scaling
+# null): 16 concurrent sessions at full context would overrun the KV/wired budget
+# and collapse prefix-cache reuse (ADR-004).
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 PI_CONTEXT_WINDOW=131072
 PI_MAX_TOKENS=16384
@@ -100,9 +121,9 @@ DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
 AGENT_LABEL="com.local.omlx"
 AGENT_PLIST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
 WRAPPER_PATH="$BIN_DIR/omlx-start-wrapper.sh"
+CONTROL_PATH="$BIN_DIR/omlxctl"   # on-demand start/stop control (ADR-005)
 
 DO_DOWNLOAD=false
-DO_SECONDARY=false
 DO_VALIDATE=false
 DO_CONFIGURE_PI=false
 OMLX_PRESENT=false   # set by install_omlx; gates whether the LaunchAgent is started
@@ -116,7 +137,6 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURC
 while [ $# -gt 0 ]; do
     case "$1" in
         --download-model) DO_DOWNLOAD=true ;;
-        --with-secondary) DO_DOWNLOAD=true; DO_SECONDARY=true ;;
         --configure-pi)   DO_CONFIGURE_PI=true ;;
         --validate)       DO_VALIDATE=true ;;
         --verbose)        VERBOSE=true ;;
@@ -134,6 +154,18 @@ preflight() {
         err "preflight" "not macOS (uname -s = $(uname -s))"; exit 2
     fi
     ok "preflight" "macOS detected"
+
+    # oMLX's documented support floor appears to be macOS 15 (Sequoia); this is a
+    # third-party signal, not first-party, so warn rather than hard-fail. Note the
+    # major version jumped to 26 (Tahoe) in 2025, so anything >= 15 is current.
+    local osver osmajor
+    osver="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+    osmajor="${osver%%.*}"
+    if [ "${osmajor:-0}" -lt 15 ]; then
+        record_warn "preflight" "macOS ${osver} is below 15 (Sequoia) — oMLX may require 15.0+; proceeding"
+    else
+        ok "preflight" "macOS ${osver}"
+    fi
 
     if [ "$(uname -m)" != "arm64" ]; then
         err "preflight" "not Apple Silicon (uname -m = $(uname -m))"; exit 2
@@ -349,7 +381,7 @@ check_omlx_cli() {
         record_err "omlx-cli" "failed to inspect '$omlx_bin serve --help' — verify the oMLX CLI before starting the LaunchAgent"
         return 1
     fi
-    for flag in --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --hot-cache-max-size --max-concurrent-requests --api-key; do
+    for flag in --host --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --hot-cache-max-size --max-concurrent-requests --api-key; do
         if ! printf '%s\n' "$help_text" | grep -q -- "$flag"; then
             record_err "omlx-cli" "'omlx serve --help' does not advertise expected flag: $flag"
             missing=true
@@ -409,10 +441,12 @@ install_service() {
         esac
     fi
 
-    # Do not start the service if the binary is missing — it would only crash-loop
-    # under KeepAlive. The config is installed; starting waits until omlx exists.
+    # Register the LaunchAgent only once omlx exists. The agent is RunAtLoad=false,
+    # so bootstrapping it merely makes the job kickstart-able (it does NOT start the
+    # server, here or at login). The config is installed regardless; registration
+    # waits until omlx exists so `omlxctl start` has something to launch.
     if ! $OMLX_PRESENT; then
-        record_warn "agent" "omlx not installed — LaunchAgent configured but not started; re-run after installing omlx"
+        record_warn "agent" "omlx not installed — LaunchAgent configured but not registered; re-run after installing omlx"
         return
     fi
     if ! check_omlx_cli "$prefix"; then
@@ -423,19 +457,56 @@ install_service() {
         if $svc_changed; then
             launchctl bootout "gui/$(id -u)/${AGENT_LABEL}" 2>/dev/null || true
             if launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
-                ok "agent" "reloaded LaunchAgent (wrapper or plist changed)"
+                ok "agent" "re-registered LaunchAgent (wrapper or plist changed; not started)"
             else
                 record_err "agent" "launchctl bootstrap (reload) failed"
             fi
         else
-            skip "agent" "LaunchAgent already loaded"
+            skip "agent" "LaunchAgent already registered"
         fi
     else
         if launchctl bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
-            ok "agent" "LaunchAgent bootstrapped (autostarts at login)"
+            ok "agent" "LaunchAgent registered (on-demand — NOT started at login; start with: omlxctl start)"
         else
             record_err "agent" "launchctl bootstrap gui failed"
         fi
+    fi
+}
+
+# --- Step: install the omlxctl control tool ---------------------------------
+# omlxctl is a static script (no placeholder substitution); render_template with
+# no key/value pairs just stages + copies it with the standard idempotency check.
+# Per the "Both" install choice (ADR-005): symlink it into the Homebrew bin when
+# that directory is writable, and always print the manual PATH fallback.
+install_control() {
+    info "Installing the omlxctl on-demand control tool"
+
+    if render_template "$TEMPLATE_DIR/omlxctl" "$CONTROL_PATH"; then
+        chmod 755 "$CONTROL_PATH"
+        ok "control" "installed $CONTROL_PATH"
+    else
+        case "$?" in
+            1) chmod 755 "$CONTROL_PATH"; skip "control" "$CONTROL_PATH already current" ;;
+            2) return 0 ;;   # render_template already recorded the error
+            *) record_err "control" "unexpected render_template status"; return 0 ;;
+        esac
+    fi
+
+    # Symlink into the Homebrew bin so `omlxctl` is on PATH (Both: link + fallback).
+    local link; link="$(brew_prefix)/bin/omlxctl"
+    local bindir; bindir="$(dirname "$link")"
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "$CONTROL_PATH" ]; then
+        skip "control-link" "$link already -> $CONTROL_PATH"
+    elif [ -e "$link" ] && [ ! -L "$link" ]; then
+        record_warn "control-link" "$link exists and is not our symlink — not overwriting; invoke $CONTROL_PATH directly"
+    elif [ -w "$bindir" ]; then
+        if ln -sfn "$CONTROL_PATH" "$link"; then
+            ok "control-link" "symlinked $link -> $CONTROL_PATH (run: omlxctl start)"
+        else
+            record_warn "control-link" "failed to symlink $link — run manually: ln -sfn $CONTROL_PATH $link"
+        fi
+    else
+        record_warn "control-link" "$bindir not writable — run: ln -sfn $CONTROL_PATH $link  (or add ~/.omlx/bin to PATH)"
     fi
 }
 
@@ -512,76 +583,16 @@ download_model() {
 
 maybe_download_models() {
     if ! $DO_DOWNLOAD; then
-        skip "model" "download is opt-in — re-run with --download-model (and --with-secondary), or use the /admin downloader (verify the exact quant tags first)"
+        skip "model" "download is opt-in — re-run with --download-model, or use the /admin downloader (verify the exact quant tags first)"
         return
     fi
-    download_model "$PRIMARY_REPO" "$PRIMARY_DIR" "model-primary"
-    if $DO_SECONDARY; then
-        download_model "$SECONDARY_REPO" "$SECONDARY_DIR" "model-secondary"
-    fi
-}
-
-# --- Step: force the primary onto the batched LLM engine (ADR-003) ----------
-# The primary checkpoint carries a vision_config, so oMLX auto-classifies it as
-# VLM — and the VLM engine crashes on any second concurrent request (oMLX
-# #1800, unfixed). Setting model_type_override=llm per model forces the
-# batched text engine. Needs a running server that has discovered the model,
-# so this step degrades to a warning plus the manual /admin instruction.
-apply_model_override() {
-    local model_id; model_id="$(basename "$PRIMARY_DIR")"
-    local manual="Manual step: in http://localhost:${PORT}/admin set Model Type Override = llm for ${model_id} (required for concurrent requests; oMLX #1800 / ADR-003)"
-
-    if [ ! -r "$API_KEY_FILE" ]; then
-        record_warn "override" "API key file not readable — cannot reach the admin API yet"
-        info "$manual"
-        return
-    fi
-    local key; key="$(cat "$API_KEY_FILE")"
-    local auth="Authorization: Bearer ${key}"
-
-    # The admin API mount prefix has drifted between oMLX versions; probe both.
-    local base settings_url=""
-    for base in "http://localhost:${PORT}/admin/api" "http://localhost:${PORT}/api"; do
-        if curl -fsS --max-time 10 -H "$auth" "${base}/models/${model_id}/settings" >/dev/null 2>&1; then
-            settings_url="${base}/models/${model_id}/settings"
-            break
-        fi
+    # All three ADR-006 tiers. download_model() skips any dir that is already
+    # populated, so on an upgrade from a single-model (ADR-004) install only the
+    # missing tiers are fetched.
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        download_model "$(tier_repo "$entry")" "$(tier_dir "$entry")" "model-$(tier_alias "$entry")"
     done
-    if [ -z "$settings_url" ]; then
-        record_warn "override" "model-settings API unreachable for ${model_id} — server down or model not yet present"
-        info "$manual"
-        return
-    fi
-
-    local current
-    current="$(curl -fsS --max-time 10 -H "$auth" "$settings_url" 2>/dev/null || true)"
-    if printf '%s' "$current" | grep -q '"model_type_override"[[:space:]]*:[[:space:]]*"llm"'; then
-        skip "override" "${model_id} already pinned to the llm (batched) engine"
-        return
-    fi
-
-    # Merge into the existing settings object rather than PUTting a bare field,
-    # in case the endpoint replaces the whole settings document.
-    local payload
-    payload="$(printf '%s' "$current" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-    if not isinstance(d, dict):
-        d = {}
-except Exception:
-    d = {}
-d["model_type_override"] = "llm"
-print(json.dumps(d))
-' 2>/dev/null)" || payload='{"model_type_override":"llm"}'
-
-    if curl -fsS --max-time 10 -X PUT -H "$auth" -H 'Content-Type: application/json' \
-        -d "$payload" "$settings_url" >/dev/null 2>&1; then
-        ok "override" "${model_id} forced onto the llm (batched) engine — validate with the concurrency probe"
-    else
-        record_warn "override" "PUT to ${settings_url} failed"
-        info "$manual"
-    fi
 }
 
 # --- Step: Pi coding-agent provider registration (--configure-pi) -----------
@@ -591,12 +602,14 @@ print(json.dumps(d))
 # parse shows an empty providers object (backup taken first; git covers the
 # rest). Anything else gets the rendered snippet plus manual merge steps.
 print_pi_settings_instructions() {
-    local settings_file="$1" primary_id="$2" secondary_id="$3"
+    local settings_file="$1"
     # settings.json is hand-curated and git-tracked; never edited automatically.
-    info "To surface the models in Pi's picker, add to the enabledModels array in $settings_file:"
-    echo "      \"omlx/${primary_id}\""
-    echo "      \"omlx/${secondary_id}\"   (if the secondary is installed)"
-    echo "      Select with: pi --model omlx/${primary_id}  (or /model in a session — models.json reloads on /model)"
+    info "To surface the tiers in Pi's picker, add to the enabledModels array in $settings_file:"
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        echo "      \"omlx/$(tier_alias "$entry")\""
+    done
+    echo "      Select with: pi --model omlx/$(tier_alias "${TIER_MODELS[0]}")  (or /model in a session — models.json reloads on /model)"
 }
 
 configure_pi_provider() {
@@ -614,24 +627,20 @@ configure_pi_provider() {
     local models_file="$PI_AGENT_DIR/models.json"
     local settings_file="$PI_AGENT_DIR/settings.json"
     local snippet_dest="$OMLX_HOME/pi-provider-snippet.json"
-    local primary_id secondary_id secondary_entry=""
-    primary_id="$(basename "$PRIMARY_DIR")"
-    secondary_id="$(basename "$SECONDARY_DIR")"
-
-    # Register the secondary when requested this run or already on disk.
-    if $DO_SECONDARY || { [ -d "$SECONDARY_DIR" ] && [ -n "$(ls -A "$SECONDARY_DIR" 2>/dev/null)" ]; }; then
-        # Flat single-line JSON: render_template substitutes via BSD sed, which
-        # cannot carry literal newlines in the replacement value.
-        secondary_entry=", {\"id\": \"${secondary_id}\", \"name\": \"${SECONDARY_ALIAS} (local oMLX)\", \"reasoning\": false, \"input\": [\"text\"], \"contextWindow\": ${PI_CONTEXT_WINDOW}, \"maxTokens\": ${PI_MAX_TOKENS}, \"cost\": {\"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0}}"
-    fi
+    # Register the tiers by their oMLX aliases (ADR-006).
+    local t1_id t2_id max_id
+    t1_id="$(tier_alias "${TIER_MODELS[0]}")"
+    t2_id="$(tier_alias "${TIER_MODELS[1]}")"
+    max_id="$(tier_alias "${TIER_MODELS[2]}")"
 
     if render_template "$TEMPLATE_DIR/pi-models-omlx.json" "$snippet_dest" \
-        "__PORT__"                  "$PORT" \
-        "__API_KEY_FILE__"          "$API_KEY_FILE" \
-        "__PRIMARY_ID__"            "$primary_id" \
-        "__PI_CONTEXT_WINDOW__"     "$PI_CONTEXT_WINDOW" \
-        "__PI_MAX_TOKENS__"         "$PI_MAX_TOKENS" \
-        "__SECONDARY_MODEL_ENTRY__" "$secondary_entry"; then
+        "__PORT__"              "$PORT" \
+        "__API_KEY_FILE__"      "$API_KEY_FILE" \
+        "__T1_ID__"             "$t1_id" \
+        "__T2_ID__"             "$t2_id" \
+        "__MAX_ID__"            "$max_id" \
+        "__PI_CONTEXT_WINDOW__" "$PI_CONTEXT_WINDOW" \
+        "__PI_MAX_TOKENS__"     "$PI_MAX_TOKENS"; then
         ok "pi-config" "rendered provider snippet: $snippet_dest"
     else
         case "$?" in
@@ -643,7 +652,7 @@ configure_pi_provider() {
     # Idempotency: never rewrite a models.json that already names this provider.
     if [ -f "$models_file" ] && grep -q '"omlx"' "$models_file"; then
         skip "pi-config" "\"omlx\" provider already present in $models_file (left untouched)"
-        print_pi_settings_instructions "$settings_file" "$primary_id" "$secondary_id"
+        print_pi_settings_instructions "$settings_file"
         return
     fi
 
@@ -683,21 +692,147 @@ PYEOF
         info "Insert the \"omlx\" block from $snippet_dest into the providers object of $models_file"
     fi
 
-    print_pi_settings_instructions "$settings_file" "$primary_id" "$secondary_id"
+    print_pi_settings_instructions "$settings_file"
 }
 
-# --- Pin/alias instructions (GUI-only; cannot be scripted) ------------------
+# --- Pin/alias fallback instructions (when the admin API can't be reached) --
 print_pin_instructions() {
-    # Printed unconditionally (not via detail/--verbose): pinning is GUI-only and
-    # cannot be scripted, so these are required manual steps, not optional detail.
-    info "Model pin + alias is admin-panel only (not a CLI flag). Manual steps:"
-    echo "      1. Ensure the server is running, then open http://localhost:${PORT}/admin"
-    echo "      2. Under Models, set the alias for $(basename "$PRIMARY_DIR") to '${PRIMARY_ALIAS}' and PIN it (keeps it resident)."
-    if $DO_SECONDARY; then
-        echo "      3. Set the alias for $(basename "$SECONDARY_DIR") to '${SECONDARY_ALIAS}'."
+    # Printed when apply_pins cannot reach the admin API. Lists every tier so the
+    # operator can set aliases + pins manually in the admin panel.
+    info "Apply model aliases + pins manually in the admin panel:"
+    echo "      1. Start the server (omlxctl start), then open http://localhost:${PORT}/admin"
+    echo "      2. Under Models, for each tier set the alias and pin state:"
+    local entry
+    for entry in "${TIER_MODELS[@]}"; do
+        if [ "$(tier_pin "$entry")" = "true" ]; then
+            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  PIN (keep co-resident)"
+        else
+            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  do NOT pin (on-demand; set idle TTL if desired)"
+        fi
+    done
+    echo "      Aliases/pins persist in ${OMLX_HOME}/model_settings.json and appear in GET /v1/models."
+    echo "      No engine override is needed — all tiers are text-only coder builds (ADR-006)."
+}
+
+# Idempotency gate: returns 0 if model_settings.json already has every tier's
+# alias and pin state. We only READ the oMLX-owned file here. Lets a re-run skip
+# the whole start/pin/stop cycle (no server churn) — key for upgrade re-runs.
+pins_already_applied() {
+    [ -f "$OMLX_HOME/model_settings.json" ] || return 1
+    python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null
+import json, os, sys
+try:
+    models = json.load(open(sys.argv[1])).get("models", {})
+except Exception:
+    sys.exit(1)
+for t in sys.argv[2:]:
+    repo, alias, pin = t.split("|")
+    m = models.get(os.path.basename(repo))
+    if not m or m.get("model_alias") != alias or bool(m.get("is_pinned")) != (pin == "true"):
+        sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
+# --- Pin/alias via the oMLX admin API (ADR-006) -----------------------------
+# Sets each tier's alias + pin state by briefly starting the server, PUTting the
+# per-model settings, then stopping it — so ADR-005's end-state invariant (server
+# stopped after setup, no login autostart) is preserved. model_settings.json is
+# oMLX-owned, so we go through the admin API rather than writing the file. The
+# admin mount prefix is probed (it has drifted between /admin/api and /api). The
+# whole step degrades to print_pin_instructions + a warning — never a hard failure.
+apply_pins() {
+    if ! $OMLX_PRESENT; then
+        record_warn "pin" "omlx not installed — skipping admin pinning; re-run after installing omlx"
+        print_pin_instructions; return
     fi
-    echo "      Aliases persist in ${OMLX_HOME}/settings.json and appear in GET /v1/models."
-    echo "      Confirm Model Type Override = llm on $(basename "$PRIMARY_DIR") if the scripted override warned (oMLX #1800; ADR-003)."
+    if [ ! -r "$API_KEY_FILE" ]; then
+        record_warn "pin" "API key not readable — skipping admin pinning"
+        print_pin_instructions; return
+    fi
+    local any_present=false entry
+    for entry in "${TIER_MODELS[@]}"; do
+        if [ -d "$(tier_dir "$entry")" ] && [ -n "$(ls -A "$(tier_dir "$entry")" 2>/dev/null)" ]; then any_present=true; fi
+    done
+    if ! $any_present; then
+        skip "pin" "no tier models on disk yet — download them (--download-model), then re-run to apply pins"
+        print_pin_instructions; return
+    fi
+    if pins_already_applied; then
+        skip "pin" "all tier aliases + pins already set in model_settings.json (no server start needed)"
+        return
+    fi
+
+    local key base auth
+    key="$(cat "$API_KEY_FILE")"
+    base="http://localhost:${PORT}"
+    auth="Authorization: Bearer ${key}"
+
+    # Only stop the server afterwards if WE started it (respect an already-running server).
+    local started_by_us=false
+    if ! curl -fsS --max-time 3 -H "$auth" "${base}/health" >/dev/null 2>&1; then
+        info "Briefly starting the server to apply pins (will stop it afterwards)"
+        if [ -x "$CONTROL_PATH" ] && "$CONTROL_PATH" start >/dev/null 2>&1; then
+            started_by_us=true
+        else
+            record_warn "pin" "could not start the server to apply pins (omlxctl start failed)"
+            print_pin_instructions; return
+        fi
+    fi
+
+    local ready=false
+    for _ in $(seq 1 60); do
+        if curl -fsS --max-time 3 -H "$auth" "${base}/health" >/dev/null 2>&1; then ready=true; break; fi
+        sleep 2
+    done
+    if ! $ready; then
+        record_warn "pin" "server did not become ready — skipping admin pinning"
+        $started_by_us && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
+        print_pin_instructions; return
+    fi
+
+    # Probe the admin mount prefix.
+    local admin="" p
+    for p in "/admin/api" "/api"; do
+        if curl -fsS --max-time 5 -H "$auth" "${base}${p}/models" >/dev/null 2>&1; then admin="$p"; break; fi
+    done
+    if [ -z "$admin" ]; then
+        record_warn "pin" "admin API not found at /admin/api or /api — apply pins manually"
+        $started_by_us && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
+        print_pin_instructions; return
+    fi
+    detail "admin API mounted at ${admin}"
+
+    local mid alias pin body
+    for entry in "${TIER_MODELS[@]}"; do
+        mid="$(basename "$(tier_repo "$entry")")"
+        alias="$(tier_alias "$entry")"
+        pin="$(tier_pin "$entry")"
+        if [ ! -d "$(tier_dir "$entry")" ]; then skip "pin-${alias}" "model ${mid} not on disk — skipping"; continue; fi
+        # PINNED tiers (T1/T2): co-resident, DFlash off. MAX tier: not pinned,
+        # idle-evict after 15 min, DFlash off (oMLX #702/#1892).
+        if [ "$pin" = "true" ]; then
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"dflash_ssd_cache\":false}"
+        else
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+        fi
+        if curl -fsS --max-time 20 -X PUT -H "$auth" -H 'Content-Type: application/json' \
+            -d "$body" "${base}${admin}/models/${mid}/settings" >/dev/null 2>&1; then
+            ok "pin-${alias}" "alias '${alias}' (pinned=${pin}) set for ${mid}"
+        else
+            record_warn "pin-${alias}" "admin PUT failed for ${mid} — set alias/pin manually at ${base}/admin"
+        fi
+    done
+
+    if $started_by_us; then
+        if "$CONTROL_PATH" stop >/dev/null 2>&1; then
+            ok "pin" "pins applied; server stopped (on-demand end-state restored)"
+        else
+            record_warn "pin" "pins applied but failed to stop the server — run: omlxctl stop"
+        fi
+    else
+        ok "pin" "pins applied against the already-running server (left running)"
+    fi
 }
 
 # --- Validation -------------------------------------------------------------
@@ -715,11 +850,17 @@ validate_endpoint() {
     if models="$(curl -fsS -H "$auth" "${base}/models" 2>/dev/null)"; then
         ok "validate-models" "GET /v1/models reachable"
         detail "$models"
-        if echo "$models" | grep -q "$PRIMARY_ALIAS"; then
-            ok "validate-alias" "alias '${PRIMARY_ALIAS}' present"
-        else
-            record_warn "validate-alias" "alias '${PRIMARY_ALIAS}' not found — pin it in /admin"
-        fi
+        # Every tier alias should be registered. The MAX tier (coding-quality) is
+        # on-demand: it is listed once discovered, but only loads on first request.
+        local entry valias
+        for entry in "${TIER_MODELS[@]}"; do
+            valias="$(tier_alias "$entry")"
+            if echo "$models" | grep -q "$valias"; then
+                ok "validate-alias" "alias '${valias}' present"
+            else
+                record_warn "validate-alias" "alias '${valias}' not found — apply pins (re-run setup) or set it in /admin"
+            fi
+        done
     else
         record_err "validate-models" "GET /v1/models failed — is the server running? (launchctl print gui/$(id -u)/${AGENT_LABEL})"
         return
@@ -749,18 +890,18 @@ validate_endpoint() {
         record_err "validate-tools" "tool-calling request failed"
     fi
 
-    # 4. concurrency probe — two parallel completions. The VLM engine crashes on
-    # a second concurrent request (oMLX #1800); model_type_override=llm is the
-    # fix (ADR-003). A single-stream validate cannot catch a broken override.
+    # 4. concurrency probe — two parallel completions confirm the batched LLM
+    # engine handles the fan-out this project exists to serve. A single-stream
+    # check cannot detect a server that serializes or fails under concurrency.
     local pid1 pid2 rc1=0 rc2=0
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid1=$!
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid2=$!
     wait "$pid1" || rc1=$?
     wait "$pid2" || rc2=$?
     if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]; then
-        ok "validate-concurrent" "2 parallel completions succeeded (batched engine confirmed)"
+        ok "validate-concurrent" "2 parallel completions succeeded (batched engine handles concurrency)"
     else
-        record_err "validate-concurrent" "parallel completions failed (rc ${rc1}/${rc2}) — likely oMLX #1800: set Model Type Override = llm for the primary in /admin (ADR-003)"
+        record_err "validate-concurrent" "parallel completions failed (rc ${rc1}/${rc2}) — check --max-concurrent-requests and the server logs ($LOG_DIR)"
     fi
 
     # 5. Anthropic-style messages endpoint (spec requires /v1/messages reachability)
@@ -790,7 +931,6 @@ summary() {
 main() {
     if $DO_VALIDATE; then
         command -v curl >/dev/null 2>&1 || { err "validate" "curl not found"; exit 2; }
-        apply_model_override
         validate_endpoint
         summary
     fi
@@ -804,16 +944,18 @@ main() {
     ensure_api_key
     install_wired_limit
     install_service
+    install_control
     maybe_download_models
-    apply_model_override
     if $DO_CONFIGURE_PI; then
         configure_pi_provider
     else
         skip "pi-config" "Pi provider registration is opt-in — re-run with --configure-pi"
     fi
-    print_pin_instructions
+    apply_pins
 
-    info "Done. Validate with: $0 --validate"
+    info "The server is installed but NOT running (startup is intentional)."
+    info "Start it on demand:  omlxctl start    (stop: omlxctl stop, status: omlxctl status)"
+    info "Then validate with:  $0 --validate"
     summary
 }
 
