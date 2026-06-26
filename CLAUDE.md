@@ -135,7 +135,9 @@ best-current-model review.
   plist well-formedness; `lint-pr-title.yml`: Conventional Commits PR title). The
   `validate` and `lint-pr-title` job names are required-check contexts on the
   `protect-dev`/`protect-main` rulesets — renaming a job breaks its ruleset binding
-  (`007`). `.markdownlint-cli2.jsonc` (repo root) configures the markdown step.
+  (`007`). `.markdownlint-cli2.jsonc` configures the markdown step; `.shellcheckrc`
+  (both repo root) gates shellcheck at `severity=warning` so the intentional
+  `A && B || true` / `((counter++)) || true` idioms (info-level SC2015) don't fail CI.
 - `adrs/` — `006-multi-tier-coresident-lineup-stay-on-omlx.md` records the current
   model lineup (superseding `004`, which superseded `003` → `002` → `001`; the
   `--memory-guard-gb`/wired-limit/concurrency from `002` and the oMLX runtime from

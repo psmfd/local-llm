@@ -43,6 +43,10 @@ Concretely:
     list, dialect auto-detected from its bash shebang), `markdownlint-cli2` with a
     repo-root `.markdownlint-cli2.jsonc`, and a `python3` ElementTree plist
     well-formedness check (`plutil` is macOS-only and absent on Linux runners).
+    `shellcheck` is gated at `severity=warning` via a repo-root `.shellcheckrc`:
+    error/warning findings fail the build, while the repo's intentional info-level
+    idioms (`A && B || true` and `((counter++)) || true`, mandated by the Script
+    Output Conventions) do not.
     `templates/pi-models-omlx.json` is a JSONC template with `__PLACEHOLDER__`
     tokens and is intentionally not JSON-validated.
   - `lint-pr-title` (`.github/workflows/lint-pr-title.yml`):
