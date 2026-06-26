@@ -1,0 +1,16 @@
+{
+  // Lint config for the validate workflow (markdownlint-cli2). Rules disabled
+  // below are noise against this repo's content, not quality gaps — see
+  // adrs/007-ci-rulesets-and-release-strategy.md for the per-rule rationale.
+  "config": {
+    "default": true,
+    "MD013": false, // line-length: technical docs carry long shell cmds, URLs, HF repo IDs
+    "MD018": false, // no-missing-space-atx: false-positive on `#1378)`-style issue refs in prose
+    "MD033": false, // no-inline-html: MADR template uses <option>/<YYYY-MM-DD> placeholders
+    "MD036": false, // no-emphasis-as-heading: bold sub-labels in older ADRs
+    "MD041": false, // first-line-heading: agent wrapper files open with prose, not a heading
+    "MD060": false  // table-column-style: compact-pipe tables are intentional
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["**/node_modules/**"]
+}
