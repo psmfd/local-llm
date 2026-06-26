@@ -75,6 +75,18 @@ _have_curl() { command -v curl >/dev/null 2>&1; }
 
 _health_ok() { _have_curl && curl -sf --max-time 3 "$HEALTH_URL" >/dev/null 2>&1; }
 
+# Print the integer "model_count" from /health (no auth key needed), or nothing
+# if curl is unavailable, the probe fails, or the field is absent. POSIX BRE so
+# it is portable to macOS/BSD sed; matches only unsigned integers. Callers MUST
+# guard the assignment (mc="$(_model_count)" || mc="") — a non-zero return would
+# otherwise abort the script under set -e.
+_model_count() {
+    _have_curl || return 1
+    local body
+    body="$(curl -sf --max-time 3 "$HEALTH_URL" 2>/dev/null)" || return 1
+    printf '%s' "$body" | sed -n 's/.*"model_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p'
+}
+
 # Poll /health until ready or READY_TIMEOUT elapses. Returns 0 ready, 1 timed out.
 _wait_ready() {
     if ! _have_curl; then
@@ -171,7 +183,7 @@ cmd_status() {
         info "launchd:  NOT REGISTERED (no job in gui/${UID_VAL} — run setup-omlx-m5.sh or log in)"
         return 0
     fi
-    local out state pid
+    local out state pid mc
     out="$(launchctl print "$TARGET" 2>/dev/null || true)"
     state="$(printf '%s\n' "$out" | awk '/^[[:space:]]*state = /{sub(/.*state = /,""); print; exit}')"
     pid="$(printf '%s\n'   "$out" | awk '/^[[:space:]]*pid = /{print $3; exit}')"
@@ -185,6 +197,16 @@ cmd_status() {
             info "health:   (curl not found — cannot probe ${HEALTH_URL})"
         elif _health_ok; then
             ok "ready" "responding at ${HEALTH_URL}"
+            # A healthy server with zero models loaded looks "up" but 404s every
+            # request — surface it here instead of in server.log (issue #4).
+            mc="$(_model_count)" || mc=""
+            if [ -z "$mc" ]; then
+                detail "model_count not present in /health response"
+            elif [ "$mc" -eq 0 ] 2>/dev/null; then
+                warn "models" "server healthy but 0 models loaded — run: ./setup-omlx-m5.sh --download-model, then pin/alias in /admin"
+            else
+                ok "models" "${mc} model(s) loaded"
+            fi
         else
             warn "ready" "process up but ${HEALTH_URL} not responding (still loading the model?)"
         fi
