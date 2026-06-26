@@ -25,8 +25,13 @@ jobs:
       # ubuntu-latest pre-installs shellcheck. Explicit file list: it covers the
       # extensionless templates/omlxctl (dialect auto-detected from its bash
       # shebang) without a find-by-shebang sweep that could pick up new files.
+      # --severity=warning gates on error/warning findings; the repo's intentional
+      # info-level idioms (SC2015 `A && B || true`, `((counter++)) || true` per the
+      # Script Output Conventions) do not fail CI. Passed explicitly rather than via
+      # .shellcheckrc because the runner's shellcheck does not reliably auto-discover
+      # the rc file; .shellcheckrc carries the same setting for local runs.
       - name: Shell lint (shellcheck)
-        run: shellcheck setup-omlx-m5.sh templates/omlx-start-wrapper.sh templates/omlxctl
+        run: shellcheck --severity=warning setup-omlx-m5.sh templates/omlx-start-wrapper.sh templates/omlxctl
 
       # Config (.markdownlint-cli2.jsonc) is auto-discovered from the repo root.
       - name: Markdown lint (markdownlint-cli2)
