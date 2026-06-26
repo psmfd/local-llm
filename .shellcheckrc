@@ -1,0 +1,9 @@
+# shellcheck config for the validate CI gate (and local runs).
+#
+# Gate at warning severity: error + warning findings fail the build; info/style
+# advisories do not. This repo's scripts intentionally use idioms shellcheck
+# flags only at info level — notably `A && B || true` (SC2015) in the ok/skip/
+# warn/detail helpers and `((counter++)) || true` counters mandated by the
+# Script Output Conventions. Those are deliberate, not defects, so they must not
+# fail CI. All three scripts are clean at this threshold. (ADR-007)
+severity=warning
