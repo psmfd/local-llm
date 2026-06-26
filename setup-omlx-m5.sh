@@ -583,7 +583,18 @@ download_model() {
 
 maybe_download_models() {
     if ! $DO_DOWNLOAD; then
-        skip "model" "download is opt-in — re-run with --download-model, or use the /admin downloader (verify the exact quant tags first)"
+        # Download is opt-in, but a run that leaves ~/models empty produces a
+        # server that serves zero models with no WARN/ERROR — surface that end
+        # state here instead of leaving it for a server.log dive (issue #4).
+        local present=0 entry
+        for entry in "${TIER_MODELS[@]}"; do
+            [ -d "$(tier_dir "$entry")" ] && { ((present++)) || true; }
+        done
+        if [ "$present" -eq 0 ]; then
+            record_warn "model" "download is opt-in and no model is on disk — the server will serve ZERO models until you run: ./setup-omlx-m5.sh --download-model (then pin/alias in /admin)"
+        else
+            skip "model" "download is opt-in — ${present} tier(s) already on disk; re-run with --download-model to fetch the rest, or use the /admin downloader"
+        fi
         return
     fi
     # All three ADR-006 tiers. download_model() skips any dir that is already

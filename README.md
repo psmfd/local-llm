@@ -52,7 +52,7 @@ Startup is intentional — nothing wires the ~32 GB model until you ask. Control
 omlxctl start     # kickstart the server, then wait for /health (cold start ~90 s)
 omlxctl stop      # SIGTERM, flush hot cache to SSD, then SIGKILL after 30 s — releases memory
 omlxctl restart   # atomic restart, then wait for ready
-omlxctl status    # launchd registration/run state + /health readiness
+omlxctl status    # launchd registration/run state + /health readiness (warns if 0 models loaded)
 omlxctl logs      # recent stdout/stderr (live: tail -f ~/.omlx/logs/launchagent.*.log)
 ```
 

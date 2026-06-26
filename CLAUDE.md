@@ -42,7 +42,7 @@ it). Start/stop it intentionally with the installed `omlxctl` tool (ADR-005):
 
 ```bash
 omlxctl start    # kickstart + wait for /health  |  omlxctl stop    # SIGTERM→SIGKILL(30s), release memory
-omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + /health state  |  omlxctl logs
+omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + /health state (warns on 0 models) |  omlxctl logs
 ```
 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. Lint with the
