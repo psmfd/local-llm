@@ -127,10 +127,17 @@ best-current-model review.
   the `com.local.iogpu-wired-limit.plist` root LaunchDaemon, `omlxctl` (the
   on-demand control tool — static, no placeholders, installed to `~/.omlx/bin`),
   and `pi-models-omlx.json` (the Pi coding-agent provider block).
-- `.claude/agents/omlx-expert.md` + `.github/agents/omlx-expert.agent.md` —
-  repository-resident `omlx-expert` domain agent (oMLX runtime + MLX model
-  selection + Apple-Silicon memory tuning), read-only/advisory, in both Claude
-  Code and GitHub Copilot wrapper formats. Keep the two wrappers in sync.
+- `.claude/agents/*.md` + `.github/agents/*.agent.md` — repository-resident
+  read-only/advisory domain agents, each in both Claude Code and GitHub Copilot
+  wrapper formats (keep each pair in sync). They stay repo-resident (not promoted to
+  a global catalog) until the planned `claude-config` split — see the memory
+  `claude-config-framework-split`. Current set:
+  - `omlx-expert` — oMLX runtime + MLX model selection + Apple-Silicon memory tuning.
+  - `amd-inference-expert` — AMD AI hardware/APIs: Ryzen/Radeon/Instinct, ROCm/HIP,
+    vLLM-on-ROCm, llama.cpp HIP/Vulkan (the AMD appliance's gfx1100 / vLLM stack).
+  - `apple-silicon-inference-expert` — Apple Silicon hardware/APIs: M-series
+    CPU/GPU/ANE, unified memory, Metal/MPS, MLX, Core ML (the layer beneath oMLX;
+    `omlx-expert` owns runtime specifics). Spec: `docs/inference-expert-agents.md`.
 - `.github/workflows/` — CI lint gate (`validate.yml`: shellcheck + markdownlint +
   plist well-formedness; `lint-pr-title.yml`: Conventional Commits PR title). The
   `validate` and `lint-pr-title` job names are required-check contexts on the
