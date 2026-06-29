@@ -230,6 +230,12 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 
 ## Router ordering
 
+> **Revised by [ADR-008](../adrs/008-cross-host-routing-integration.md) for the
+> two-host topology** — see [Cross-host topology](#cross-host-topology-adr-008) below.
+> With the AMD peer present, the AMD backend registers *first* and serves
+> `coding-fast` only; oMLX serves `coding-balanced`/`coding-quality` and is the
+> fast-role fallback. The single-host narrative here still describes the oMLX side.
+
 - **Order = priority.** Register oMLX first; the router iterates registration
   order, so the local backend is primary for every role. It catches
   `InferenceUnavailableException` and advances to the next backend.
@@ -242,6 +248,23 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
   `InferenceUnavailableException` → fallback to the next backend.
 - **Saturation.** oMLX runs at `--max-concurrent-requests 16`; a 429 trips the
   circuit breaker, diverting traffic to the remote backend until it recovers.
+
+## Cross-host topology (ADR-008)
+
+With the always-on **AMD vLLM appliance** added as a second endpoint, the router is
+no longer single-host. Register the AMD backend **first** and the Mac oMLX backend
+second:
+
+- `coding-fast` → **AMD vLLM** primary; on `InferenceUnavailableException` →
+  **Mac oMLX T1** (still co-resident, zero-swap) → cloud.
+- `coding-balanced` → AMD throws `InferenceUnavailableException` (it serves only
+  `coding-fast`) → **Mac oMLX T2** → cloud.
+- `coding-quality` → AMD can't fit the ~45 GB max tier → **Mac oMLX** on-demand → cloud.
+
+The AMD backend's alias dictionary contains only `coding-fast`; every other role
+throws `InferenceUnavailableException` so the chain advances — which is why **both**
+backends must throw that exception type (not `ArgumentOutOfRangeException`) for
+unserved roles. See [ADR-008](../adrs/008-cross-host-routing-integration.md).
 
 ## Gotchas
 
@@ -264,5 +287,5 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
   pinned version.
 - Requires the `Microsoft.Extensions.Http.Resilience` NuGet package.
 
-_Source: synthesized from `dotnet-expert` against .NET 10 LTS guidance
-(`learn.microsoft.com` HTTP resilience + `IHttpClientFactory` docs)._
+*Source: synthesized from `dotnet-expert` against .NET 10 LTS guidance
+(`learn.microsoft.com` HTTP resilience + `IHttpClientFactory` docs).*

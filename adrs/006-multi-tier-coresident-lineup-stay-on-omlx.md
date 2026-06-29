@@ -12,6 +12,12 @@ carry forward unchanged. The full investigation behind this decision is recorded
 [docs/runtime-tiering-research.md](../docs/runtime-tiering-research.md) (Parts 1–6),
 including an on-host bake-off on the M5 Max target.
 
+**Extended by [ADR-008](008-cross-host-routing-integration.md):** the abstract remote
+`coding-quality`/fallback backend is concretized as an always-on AMD vLLM appliance,
+and router ordering is revised to **AMD-first for `coding-fast`** (a second endpoint).
+ADR-006's lineup, co-resident pinning, wired limit, and single-host oMLX serving are
+**unchanged on the Mac** — ADR-008 adds the second host, it does not supersede this one.
+
 ## Context and Problem Statement
 
 ADR-004 collapsed the lineup to a single text-only model, leaving the
