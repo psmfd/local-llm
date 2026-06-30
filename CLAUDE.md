@@ -25,6 +25,14 @@ runtime reassessment, on-host bake-off, and tier selection — is in
 `omlx-setup-prompt.md` is retained only as the historical source prompt; do not
 copy it forward as an additional source of truth.
 
+[`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md)
+records a **forward direction** — reframing the Mac as a *single-model subagent
+workhorse* with the cloud as the frontier (ADR-006's three tiers collapse to one
+pinned 3B-active MoE; the AMD appliance of ADR-008 is absorbed). It is
+**additive: it supersedes nothing yet**, so ADR-006 remains the implemented
+lineup until the model-selection probes pass and the rework lands
+([#14](https://github.com/psmfd/local-llm/issues/14)).
+
 ## Commands
 
 The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user):
@@ -151,7 +159,12 @@ best-current-model review.
   `001` carry forward); `005-on-demand-service-lifecycle.md` records the on-demand
   start/stop lifecycle (no login autostart) — additive, still in force under `006`;
   `007-ci-rulesets-and-release-strategy.md` records the CI gate, branch-protection
-  rulesets, and the deferred-`semantic-release` decision; `TEMPLATE.md` is the MADR
+  rulesets, and the deferred-`semantic-release` decision;
+  `008-cross-host-routing-integration.md` integrates the second AMD host and
+  AMD-first `coding-fast` routing — additive, extends `006`;
+  `009-mac-single-workhorse-cloud-frontier.md` records the forward-direction
+  single-model workhorse reframe (cloud as frontier) — additive, supersedes
+  nothing yet (implementation tracked in #14); `TEMPLATE.md` is the MADR
   minimal template for new ADRs (sequential, zero-padded three digits). The model
   decision rationale lives in `docs/runtime-tiering-research.md`.
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /

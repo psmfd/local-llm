@@ -5,6 +5,14 @@ behind your `FallbackInferenceRouter`, routing the three local tiers
 (`coding-fast`, `coding-balanced`, `coding-quality`) → oMLX and falling through to
 a remote backend on failure or saturation.
 
+> **Forward direction — [ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md)
+> (additive, pending implementation #14).** A reframe collapses the Mac to a
+> *single* GLM-4.7-Flash workhorse (local executor) with the **cloud as the
+> frontier/quality tier** and the AMD peer repurposed. See
+> [ADR-009 forward direction](#adr-009-forward-direction-single-workhorse-cloud-frontier)
+> below; the ADR-006/008 multi-tier wiring described first remains the implemented
+> state until #14 lands.
+
 - **Endpoint:** `http://localhost:8000/v1` (OpenAI-style `POST /v1/chat/completions`).
   oMLX also serves Anthropic-style `POST /v1/messages`; this note uses the
   OpenAI chat-completions shape.
@@ -265,6 +273,101 @@ The AMD backend's alias dictionary contains only `coding-fast`; every other role
 throws `InferenceUnavailableException` so the chain advances — which is why **both**
 backends must throw that exception type (not `ArgumentOutOfRangeException`) for
 unserved roles. See [ADR-008](../adrs/008-cross-host-routing-integration.md).
+
+## ADR-009 forward direction: single workhorse, cloud frontier
+
+[ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md) is **additive and not
+yet implemented** (tracked in #14); the wiring above stays in force until then. The
+forward target:
+
+- **Local Mac = one pinned GLM-4.7-Flash workhorse** serving the executor roles;
+  the AMD peer (ADR-008) is repurposed/deprecated.
+- **Cloud = the frontier**: the high-fidelity `coding-quality` role routes to a
+  cloud backend, not a local tier.
+
+Collapse the three local aliases to one workhorse model, and let the quality role
+fall through to the cloud frontier backend:
+
+```csharp
+// oMLX workhorse backend: executor roles all map to the single pinned model.
+private static readonly Dictionary<ModelRole, string> ModelAliases = new()
+{
+    [ModelRole.Fast]     = "coding-workhorse",   // single GLM-4.7-Flash alias
+    [ModelRole.Balanced] = "coding-workhorse",
+    // Quality is NOT served locally — omit it so the role throws
+    // InferenceUnavailableException and the chain advances to the cloud frontier.
+};
+```
+
+Router ordering under ADR-009:
+
+- `coding-fast` / `coding-balanced` → **Mac oMLX workhorse** primary → cloud fallback.
+- `coding-quality` → Mac throws `InferenceUnavailableException` (no local quality
+  tier) → **cloud frontier** backend (registered for the quality role).
+
+Serving/resilience notes specific to the workhorse:
+
+- oMLX runs `--max-concurrent-requests 10` (**"The Mark"**, validated on-host; the
+  safe ceiling falls as shared-prefix context grows — clean to N≥15 @ ~9K ctx but
+  10 @ ~16K, so keep subagent prefixes modest). A 429 or a memory-guard 500 trips
+  the circuit breaker → cloud.
+- GLM-4.7-Flash emits a **reasoning preamble before tool calls**; keep `max_tokens`
+  ≥ ~200 on tool-bearing requests so the call is not truncated, and keep
+  `AttemptTimeout` generous (no ~16 s cold-load tier anymore, but decode + preamble
+  still take time).
+
+## Tool-call schema-validate-and-retry guard
+
+A small local workhorse occasionally emits a malformed tool call (invalid JSON
+arguments) or — if `max_tokens` is too low — truncates before completing it. A
+single malformed call breaks an agent pipeline silently. Wrap tool-bearing
+completions in a validate-and-retry loop at the dispatcher: parse the call,
+validate its arguments against the tool's JSON schema, and on failure re-issue once
+with a structured corrective message before falling through.
+
+```csharp
+// Sketch — assumes the backend surfaces tool_calls and you hold the tool's
+// argument schema. Validates the arguments JSON; retries once on failure.
+public async Task<InferenceResponse> CompleteWithToolGuardAsync(
+    InferenceRequest request, Func<string, bool> argumentsAreValid, CancellationToken ct = default)
+{
+    var messages = request.Messages.ToList();
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        InferenceResponse resp = await CompleteAsync(request with { Messages = messages }, ct);
+
+        // Adapt extraction to your wire shape; a null/empty call or invalid-JSON
+        // arguments is the failure we retry on.
+        string? toolArgs = TryExtractToolArguments(resp);
+        if (toolArgs is not null && argumentsAreValid(toolArgs))
+            return resp;
+
+        if (attempt == 0)
+        {
+            // One corrective turn: name what was wrong, demand a single clean call.
+            messages.Add(new ChatMessage("assistant", resp.Content));
+            messages.Add(new ChatMessage("user",
+                "The previous tool call was missing or had invalid JSON arguments. " +
+                "Return exactly one well-formed tool call matching the schema, with no other text."));
+            continue;
+        }
+
+        // Both attempts failed — advance to the next backend rather than pass a
+        // malformed call downstream.
+        throw new InferenceUnavailableException("Workhorse returned no valid tool call after one retry.");
+    }
+    throw new InvalidOperationException("unreachable");
+}
+```
+
+Notes:
+
+- Keep the retry count at **one** — the failure is usually a truncation or a
+  formatting slip the corrective turn fixes; more retries waste a fan-out slot.
+- Validate against the **actual tool schema** (required fields, types), not merely
+  "is it JSON" — the common GLM failure is a complete-but-wrong-shape object.
+- Pair with generous `max_tokens` (above); truncation is the most common cause of a
+  missing call.
 
 ## Gotchas
 
