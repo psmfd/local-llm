@@ -5,6 +5,14 @@ any oMLX or model update), closing the residual risks the ADR-009 review
 flagged. Neither is part of `--validate` — both need a long prompt or a
 model-behavior judgement that the scripted checks deliberately avoid.
 
+> **Last run: 2026-07-02, oMLX 0.4.4 — both probes PASS.** Probe 1: baseline
+> 30.0 GB resident; a 19,470-token prompt added +2.1 GB resident / +7.0 GB peak
+> (MLA-class — an MHA fallback would have added ~18 GB), with 19,456/19,470
+> tokens prefix-cache-hit on repeat. Probe 2: `enable_thinking:false` accepted —
+> completion dropped from 38 tokens (reasoning field present) to 1 token.
+> Orchestrators MAY send `chat_template_kwargs: {"enable_thinking": false}` on
+> oMLX ≥ 0.4.4; keep the `max_tokens ≥ 200` floor regardless.
+
 Prereqs: server provisioned, `omlxctl start` done, `KEY="$(cat ~/.omlx/api-key)"`.
 
 ## 1. Long-context MLA-compression probe (≥16K tokens)
@@ -21,7 +29,7 @@ at ~7.3K tokens; this re-check covers the 9–16K range the fan-out actually use
 
    ```bash
    omlxctl status
-   vmmap --summary "$(pgrep -f 'omlx serve')" | grep -i 'physical footprint'
+   vmmap --summary "$(pgrep -x omlx-server)" | grep -i 'physical footprint'
    ```
 
 2. Send one completion with a ≥16K-token prompt (any large file dump works —
