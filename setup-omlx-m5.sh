@@ -375,7 +375,12 @@ install_wired_limit() {
         ok "wired-daemon" "installed $DAEMON_PLIST (root:wheel 0644)"
     fi
 
-    if sudo launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+    # Loaded-check without sudo first: `launchctl print system/<label>` is
+    # readable unprivileged, and a sudo-wrapped check fails under NON-INTERACTIVE
+    # sudo even when the job IS loaded — which then mis-fires a bootstrap attempt
+    # and records a spurious error on an already-converged host.
+    if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1 \
+        || sudo launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
         skip "wired-daemon" "LaunchDaemon already loaded"
     else
         if sudo launchctl bootstrap system "$DAEMON_PLIST"; then
@@ -865,13 +870,26 @@ apply_pins() {
         print_pin_instructions; return
     fi
 
-    # Probe the admin mount prefix.
+    # Admin auth: oMLX >= 0.4.4 requires a session login (POST /admin/api/login
+    # with the API key -> session cookie); the bearer key alone gets a 401
+    # "Admin authentication required". Older builds accepted the bearer key
+    # directly, so the probe below still sends both — the cookie jar is empty
+    # (harmless) when the login endpoint does not exist.
+    local cookie_jar
+    cookie_jar="$(mktemp)"
+    if curl -fsS --max-time 5 -c "$cookie_jar" -H 'Content-Type: application/json' \
+        -d "{\"api_key\":\"${key}\"}" "${base}/admin/api/login" >/dev/null 2>&1; then
+        detail "admin session established via /admin/api/login"
+    fi
+
+    # Probe the admin mount prefix (cookie + bearer — whichever the build honors).
     local admin="" p
     for p in "/admin/api" "/api"; do
-        if curl -fsS --max-time 5 -H "$auth" "${base}${p}/models" >/dev/null 2>&1; then admin="$p"; break; fi
+        if curl -fsS --max-time 5 -b "$cookie_jar" -H "$auth" "${base}${p}/models" >/dev/null 2>&1; then admin="$p"; break; fi
     done
     if [ -z "$admin" ]; then
         record_warn "pin" "admin API not found at /admin/api or /api — apply pins manually"
+        rm -f "$cookie_jar"
         $started_by_us && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
         print_pin_instructions; return
     fi
@@ -889,7 +907,7 @@ apply_pins() {
         else
             body="{\"model_alias\":\"${alias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
         fi
-        if curl -fsS --max-time 20 -X PUT -H "$auth" -H 'Content-Type: application/json' \
+        if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
             -d "$body" "${base}${admin}/models/${mid}/settings" >/dev/null 2>&1; then
             ok "pin-${alias}" "alias '${alias}' (pinned=${pin}) set for ${mid}"
         else
@@ -915,7 +933,7 @@ apply_pins() {
             clean)  skip "unpin-${rmid}" "already unpinned (DFlash off)" ;;
             dirty)
                 body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
-                if curl -fsS --max-time 20 -X PUT -H "$auth" -H 'Content-Type: application/json' \
+                if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
                     -d "$body" "${base}${admin}/models/${rmid}/settings" >/dev/null 2>&1; then
                     ok "unpin-${rmid}" "retired tier unpinned (stays on disk; memory freed on next start)"
                 else
@@ -924,6 +942,7 @@ apply_pins() {
                 ;;
         esac
     done
+    rm -f "$cookie_jar"
 
     if $started_by_us; then
         if "$CONTROL_PATH" stop >/dev/null 2>&1; then
