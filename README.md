@@ -4,11 +4,11 @@ Stand up a **local, OpenAI/Anthropic-compatible LLM inference server** on an App
 
 ## TL;DR — start now
 
-You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~140 GB free disk (three model tiers ≈ 105 GB plus cache headroom), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
+You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~60 GB free disk (the workhorse model ≈ 30 GB plus staging/cache headroom), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
 
 ```bash
 git clone https://github.com/psmfd/local-llm.git && cd local-llm
-./setup-omlx-m5.sh --download-model   # install + configure + fetch the 3 tiers (~105 GB)
+./setup-omlx-m5.sh --download-model   # install + configure + fetch the workhorse (~30 GB)
 omlxctl start                         # start the server on demand (NOT at login)
 ./setup-omlx-m5.sh --validate         # smoke-test the running server
 ```
@@ -23,30 +23,28 @@ The script is idempotent — re-running it skips whatever already exists. Run `.
 
 `setup-omlx-m5.sh` performs, in order:
 
-1. **Preflight** — hard-fails (exit `2`) on non-macOS, non-arm64, <~120 GB RAM, <~100 GB free disk, or missing Homebrew.
+1. **Preflight** — hard-fails (exit `2`) on non-macOS, non-arm64, <~120 GB RAM, <~60 GB free disk, or missing Homebrew.
 2. **Installs oMLX** via `brew tap jundot/omlx && brew install omlx` (no MCP — tool access stays explicit).
 3. **Creates directories** — `~/models`, `~/.omlx/{cache,logs,bin}` (`~/.omlx` is chmod 700).
 4. **Generates an API key** at `~/.omlx/api-key` (chmod 600, never printed).
 5. **Raises the Metal wired limit** to ~96 GB so the GPU can hold the model resident, persisted across reboots via a root LaunchDaemon (**the sudo step**).
 6. **Installs on-demand service control** — a start wrapper carrying the tuned serving flags, a per-user LaunchAgent (`RunAtLoad=false`, `KeepAlive=false` — registered at login but **not** started), and the `omlxctl` control tool (symlinked onto your `PATH` when the Homebrew bin is writable). Setup deliberately leaves the server stopped ([ADR-005](adrs/005-on-demand-service-lifecycle.md)).
 
-Model download is **opt-in** (`--download-model`); the base run never pulls weights. No engine override is applied — every tier is a verified text-only coder build, so oMLX runs each on its batched LLM engine and it is concurrency-safe as-is ([ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)).
+Model download is **opt-in** (`--download-model`); the base run never pulls weights. No engine override is applied — the workhorse is a verified text-only coder build, so oMLX runs it on its batched LLM engine and it is concurrency-safe as-is ([ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md)).
 
-## Model tiers
+## The workhorse model
 
-Three tiers ([ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)), all verified text-only (no `vision_config`) and tool-call-verified on oMLX:
+One pinned model ([ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md)) — the Mac is a **subagent workhorse** and high-fidelity work routes to a cloud frontier, not to a local tier:
 
-| Tier | Alias | Model | ~Size | Residency |
-|---|---|---|---|---|
-| fast | `coding-fast` | `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` (MoE, ~3 B active, 262 K ctx) | ~30 GB | pinned, co-resident |
-| balanced | `coding-balanced` | `mlx-community/GLM-4.7-Flash-8bit` (MoE-lite, ~3 B active, 202 K ctx) | ~30 GB | pinned, co-resident |
-| quality | `coding-quality` | `lmstudio-community/Qwen3-Coder-Next-MLX-4bit` (MoE, 80 B/~3 B active, ~71 % SWE-bench) | ~45 GB | on-demand (lazy-load ~16 s, idle-evicts) |
+| Alias | Model | ~Size | Residency |
+|---|---|---|---|
+| `coding-workhorse` | `mlx-community/GLM-4.7-Flash-8bit` (MoE, ~3 B active, 202 K ctx, MLA KV compression) | ~30 GB | pinned, sole resident |
 
-`coding-fast` + `coding-balanced` stay **co-resident and pinned** (~60 GB, leaving ~29 GB for KV/prefix cache under the 90 GB memory guard, itself below the 96 GB wired ceiling), so the parallel-agent fan-out never pays a swap cost. `coding-quality` is the genuine high-fidelity tier — it does not co-reside (45 GB + 60 GB exceeds the budget), so oMLX **lazy-loads it on first request** and evicts it when idle. The setup script applies aliases + pins via the oMLX admin API (briefly starting the server, then stopping it; falls back to printed manual steps). Re-verify the HuggingFace repo IDs against current availability before downloading — the script probes them, but better checkpoints ship often.
+A single pinned model gives the parallel-agent fan-out **one shared prefix cache and ~60 GB of KV headroom** under the 90 GB memory guard (vs ~29 GB with ADR-006's co-resident pair), and never exercises oMLX's multi-model swap path. `--max-concurrent-requests` is 10 — safe concurrency is prefill-activation-bound and falls with context length (measured 10 clean at ~16 K ctx); excess requests queue at admission. `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` may remain on disk from an earlier install as the documented **inactive fallback** — it is never downloaded, pinned, or served by default. The setup script applies the alias + pin via the oMLX admin API (briefly starting the server, then stopping it; falls back to printed manual steps) and **unpins retired ADR-006 tiers** it finds. Re-verify the HuggingFace repo ID against current availability before downloading — the script probes it, but better checkpoints ship often.
 
 ## Starting and stopping
 
-Startup is intentional — nothing wires the ~32 GB model until you ask. Control the server with `omlxctl` (installed to `~/.omlx/bin/omlxctl`, symlinked onto `PATH` when possible; otherwise call it by full path or add `~/.omlx/bin` to `PATH`):
+Startup is intentional — nothing wires the ~30 GB model until you ask. Control the server with `omlxctl` (installed to `~/.omlx/bin/omlxctl`, symlinked onto `PATH` when possible; otherwise call it by full path or add `~/.omlx/bin` to `PATH`):
 
 ```bash
 omlxctl start     # kickstart the server, then wait for /health (cold start ~90 s)
@@ -62,7 +60,7 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 
 ## Validating
 
-`./setup-omlx-m5.sh --validate` runs five checks against the running server: model listing, a small chat completion, a **tool-calling** round-trip, a **2-way concurrency probe** (confirms the batched engine handles the fan-out), and an Anthropic-style `/v1/messages` call.
+`./setup-omlx-m5.sh --validate` runs five checks against the running server: model listing (including a warning if a retired ADR-006 tier is still pinned), a small chat completion, a **tool-calling** round-trip, a **2-way concurrency probe** (confirms the batched engine handles the fan-out), and an Anthropic-style `/v1/messages` call. Before trusting the config under real load, also run the one-time on-host probes in [docs/workhorse-probes.md](docs/workhorse-probes.md) (long-context MLA check, `enable_thinking` pass-through).
 
 ## Connecting clients
 
@@ -78,24 +76,24 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 | [`setup-omlx-m5.sh`](setup-omlx-m5.sh) | The provisioning script (idempotent; exit codes `0` pass / `1` error / `2` precondition) |
 | [`templates/`](templates/) | Start wrapper, LaunchAgent/LaunchDaemon plists, `omlxctl` control tool, Pi provider block — installed with placeholder substitution |
 | [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md) | The authoritative implementation brief |
-| [`adrs/`](adrs/) | Decision records — current model lineup is [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) (two co-resident pinned tiers + one on-demand max tier, stay on oMLX; supersedes [ADR-004](adrs/004-single-text-only-model-no-override.md)), [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart), and [ADR-008](adrs/008-cross-host-routing-integration.md) (cross-host AMD routing — extends ADR-006). [ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md) records a **forward direction** (single-model workhorse, cloud as frontier) — additive, not yet implemented; tracked in [#14](https://github.com/psmfd/local-llm/issues/14) |
+| [`adrs/`](adrs/) | Decision records — the current lineup is [ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md) (single-model workhorse, cloud as frontier; supersedes [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) three-tier lineup and [ADR-008](adrs/008-cross-host-routing-integration.md) cross-host AMD routing), plus [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart — still in force) |
 | `.claude/agents/`, `.github/agents/` | Repository-resident `omlx-expert` domain agent (read-only/advisory) for Claude Code and GitHub Copilot |
 | [`.github/workflows/`](.github/workflows/) | CI lint gate — `validate` (shellcheck + markdownlint + plist well-formedness) and `lint-pr-title` (Conventional Commits), required checks on the branch rulesets ([ADR-007](adrs/007-ci-rulesets-and-release-strategy.md)) |
 | [`docs/router-wiring.md`](docs/router-wiring.md) | Wiring the server into a .NET `IInferenceBackend` / `FallbackInferenceRouter` |
 | [`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md) | Research note behind [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) — runtime reassessment, on-host bake-off, and tier selection |
 | [`omlx-setup-prompt.md`](omlx-setup-prompt.md) | Historical source prompt only — not a source of truth |
 
-## Upgrading from a single-model (ADR-004) install
+## Upgrading from the three-tier (ADR-006) install
 
-If you previously provisioned the single-model (ADR-004) lineup, just re-run the script — it is an in-place, non-destructive upgrade:
+If you previously provisioned the three-tier lineup, just re-run the script — it is an in-place, non-destructive upgrade:
 
 ```bash
 git pull
-./setup-omlx-m5.sh --download-model   # fetches only the 2 new tiers; the existing 30B is skipped
-./setup-omlx-m5.sh --validate         # confirms all three aliases resolve
+./setup-omlx-m5.sh            # GLM is already on disk from T2 — no download needed
+./setup-omlx-m5.sh --validate # confirms coding-workhorse resolves and retired tiers are unpinned
 ```
 
-The re-run detects the existing `coding-fast` model + pin, downloads only the missing `coding-balanced`/`coding-quality` tiers, and applies the new aliases/pins via the admin API (it briefly starts the server, then stops it). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json`). Running it twice is a no-op.
+The re-run re-renders the start wrapper with the new serving flags (`--hot-cache-max-size 24GB`, `--max-concurrent-requests 10`), renames GLM's alias from `coding-balanced` to `coding-workhorse`, and **actively unpins the retired tiers** (Qwen3-Coder-30B, Qwen3-Coder-Next) via the admin API so their ~30–45 GB is actually freed — the models stay on disk (Qwen3-Coder-30B is the documented inactive fallback; delete Qwen3-Coder-Next by hand if you want the disk back). If the server is running when you re-run, the wrapper update stops it (restart with `omlxctl start`). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json` — note the provider now exposes only `coding-workhorse`). Running it twice is a no-op.
 
 ## Teardown
 
@@ -110,8 +108,9 @@ sudo launchctl bootout system/com.local.iogpu-wired-limit 2>/dev/null || true
 sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 brew uninstall omlx && brew untap jundot/omlx
 rm -rf ~/.omlx \
-  ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
-  ~/models/GLM-4.7-Flash-8bit \
+  ~/models/GLM-4.7-Flash-8bit                       # the workhorse
+# Also remove whichever retired ADR-006 tiers are still on disk:
+rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
   ~/models/Qwen3-Coder-Next-MLX-4bit
 ```
 

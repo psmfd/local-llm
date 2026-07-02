@@ -60,9 +60,13 @@ fi
 # saturation surfaces as server-level backpressure, not Metal wiring failures. It
 # replaced the removed --max-process-memory flag (ADR-002); per oMLX #702 it
 # monitors Metal allocations, not total RSS.
-# --hot-cache-max-size accepts both absolute sizes ('18GB') and percentages
-# ('20%'). We pin an absolute 18GB for a deterministic hot-cache footprint
-# independent of how oMLX resolves a percentage (≈ 20% of the 90 GB guard).
+# --hot-cache-max-size accepts both absolute sizes ('24GB') and percentages
+# ('20%'). We pin an absolute 24GB for a deterministic hot-cache footprint
+# independent of how oMLX resolves a percentage (≈ 27% of the 90 GB guard — up
+# from ADR-006's 18GB: one model, no second cache to fund; ADR-009).
+# --max-concurrent-requests 10 is ADR-009's "Mark": safe concurrency is
+# prefill-activation-bound and context-dependent (measured 10 clean @ ~16K ctx);
+# excess requests queue at admission rather than aborting mid-flight.
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \
@@ -71,6 +75,6 @@ exec "__BREW_PREFIX__/bin/omlx" serve \
     --port 8000 \
     --memory-guard-gb 90 \
     --paged-ssd-cache-dir "__CACHE_DIR__" \
-    --hot-cache-max-size 18GB \
-    --max-concurrent-requests 16 \
+    --hot-cache-max-size 24GB \
+    --max-concurrent-requests 10 \
     --api-key "$api_key"

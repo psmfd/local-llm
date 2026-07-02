@@ -52,8 +52,11 @@ over single-stream tok/s). You return advice and exact commands; you never modif
 ### Model selection (128 GB, parallel coding agents)
 
 - Prefer text-only coder MoE models with strong native tool-calling and large
-  context. Current pick: `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`
-  (~32 GB, `Qwen3MoeForCausalLM`, 262,144 native context, `rope_scaling: null`).
+  context. Current pick (ADR-009 workhorse): `mlx-community/GLM-4.7-Flash-8bit`
+  (~30 GB, `Glm4MoeLiteForCausalLM`, 202K native context, MLA KV compression —
+  verified ≈ GQA footprint on oMLX). Verified fallback kept on disk:
+  `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` (~30.6 GB,
+  `Qwen3MoeForCausalLM`, GQA, 262,144 native context, `rope_scaling: null`).
 - A single resident model maximizes the KV/prefix-cache budget under the wired
   ceiling; co-residency of two large models roughly halves it.
 - Will **not** fit 128 GB: `Qwen3-Coder-480B-A35B` (~540 GB @ 8-bit), Kimi K2.x
