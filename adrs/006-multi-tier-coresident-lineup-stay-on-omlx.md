@@ -1,6 +1,6 @@
 # ADR-006: Restore a multi-tier lineup — two co-resident pinned tiers + one on-demand max tier, staying on oMLX
 
-- Status: accepted
+- Status: superseded by [ADR-009](009-mac-single-workhorse-cloud-frontier.md)
 - Date: 2026-06-24
 
 Supersedes [ADR-004](004-single-text-only-model-no-override.md) for the model

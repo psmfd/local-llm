@@ -12,26 +12,21 @@ requests that share long system prefixes, so **concurrent throughput and
 prefix-cache reuse matter more than single-stream tok/s**.
 
 The authoritative brief is [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md);
-the current model-lineup decision is [`adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md`](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)
-(two co-resident pinned tiers + one on-demand max tier; stay on oMLX), which
-supersedes [`adrs/004-single-text-only-model-no-override.md`](adrs/004-single-text-only-model-no-override.md)
-and, through it, [`adrs/003-vlm-engine-workaround-lineup.md`](adrs/003-vlm-engine-workaround-lineup.md)
-and [`adrs/002-qwen36-lineup-memory-guard.md`](adrs/002-qwen36-lineup-memory-guard.md)
-(whose `--memory-guard-gb` migration, wired limit, and concurrency carry forward)
-and [`adrs/001-local-mlx-inference-omlx.md`](adrs/001-local-mlx-inference-omlx.md)
-(whose oMLX runtime choice is reaffirmed by ADR-006). The full investigation —
-runtime reassessment, on-host bake-off, and tier selection — is in
-[`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md).
+the current model-lineup decision is [`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md)
+(the Mac is a **single-model subagent workhorse** — one pinned 3B-active MoE,
+GLM-4.7-Flash-8bit as `coding-workhorse` — with a **cloud provider as the
+quality frontier**; implemented via [#14](https://github.com/psmfd/local-llm/issues/14)).
+ADR-009 supersedes [`adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md`](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)
+(the three-tier lineup) and [`adrs/008-cross-host-routing-integration.md`](adrs/008-cross-host-routing-integration.md)
+(cross-host AMD routing; the appliance is repurposed/deprecated). ADR-002's
+`--memory-guard-gb` migration and wired limit, and ADR-001's oMLX runtime
+choice, carry forward unchanged; [`adrs/005-on-demand-service-lifecycle.md`](adrs/005-on-demand-service-lifecycle.md)
+(on-demand lifecycle) remains in force. The model-selection research is in
+[`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md); the
+one-time on-host probes (long-context MLA, `enable_thinking`) are in
+[`docs/workhorse-probes.md`](docs/workhorse-probes.md).
 `omlx-setup-prompt.md` is retained only as the historical source prompt; do not
 copy it forward as an additional source of truth.
-
-[`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md)
-records a **forward direction** — reframing the Mac as a *single-model subagent
-workhorse* with the cloud as the frontier (ADR-006's three tiers collapse to one
-pinned 3B-active MoE; the AMD appliance of ADR-008 is absorbed). It is
-**additive: it supersedes nothing yet**, so ADR-006 remains the implemented
-lineup until the model-selection probes pass and the rework lands
-([#14](https://github.com/psmfd/local-llm/issues/14)).
 
 ## Commands
 
@@ -39,7 +34,7 @@ The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user)
 
 ```bash
 ./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service + omlxctl (no model download; server NOT started)
-./setup-omlx-m5.sh --download-model # also fetch the model (~32 GB) via hf
+./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~30 GB) via hf
 ./setup-omlx-m5.sh --configure-pi   # register the oMLX provider with the Pi coding agent (~/.pi/agent/models.json)
 ./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency) against a running server
 ./setup-omlx-m5.sh --verbose --help
@@ -54,14 +49,15 @@ omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + 
 ```
 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. Lint with the
-`linter` agent (shellcheck). The Metal wired-limit step needs `sudo`. Aliases +
-pins are applied via the **oMLX admin API** (`apply_pins` briefly starts the
-server, PUTs each tier's settings, then stops it — `model_settings.json` is
-oMLX-owned, so the script never writes it directly); it degrades to printed
-manual admin-panel steps if the API can't be reached (ADR-006).
+`linter` agent (shellcheck). The Metal wired-limit step needs `sudo`. The
+workhorse alias + pin is applied via the **oMLX admin API** (`apply_pins` briefly
+starts the server, PUTs the model's settings — and **unpins any retired ADR-006
+tiers** it finds registered — then stops it; `model_settings.json` is oMLX-owned,
+so the script never writes it directly); it degrades to printed manual
+admin-panel steps if the API can't be reached (ADR-009).
 
 Preflight hard-fails with exit `2` for non-macOS, non-arm64, RAM below ~120 GB,
-free disk below ~100 GB, or missing Homebrew. M5 Max is the tuned target; a
+free disk below ~60 GB, or missing Homebrew. M5 Max is the tuned target; a
 non-M5 Apple Silicon chip warns instead of hard-failing so nearby Max-class hosts
 can still smoke-test deliberately.
 
@@ -88,27 +84,27 @@ best-current-model review.
 
 - **Runtime:** oMLX via Homebrew —
   `brew tap jundot/omlx https://github.com/jundot/omlx && brew install omlx`
-- **Models (three tiers, all text-only; ADR-006):** every tier is a verified
-  text-only coder build (`*ForCausalLM`, no `vision_config`) and tool-call-verified
-  on oMLX, so each routes to the batched LLM engine with **no engine override**.
-  - **T1 `coding-fast`** — `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`
-    (`Qwen3MoeForCausalLM`, MoE ~3B active, 262K ctx). ~30.6 GB. **Pinned, co-resident.**
-  - **T2 `coding-balanced`** — `mlx-community/GLM-4.7-Flash-8bit`
-    (`Glm4MoeLiteForCausalLM`, MoE ~3B active, 202K ctx). ~30 GB. **Pinned, co-resident.**
-  - **MAX `coding-quality`** — `lmstudio-community/Qwen3-Coder-Next-MLX-4bit`
-    (`Qwen3NextForCausalLM`, 80B/~3B active, ~71% SWE-bench). ~45 GB. **On-demand**
-    (lazy-loads ~16 s on first request, idle-evicts; NOT pinned — it does not
-    co-reside alongside T1+T2 under the wired ceiling).
-  T1+T2 stay co-resident (~60 GB) leaving ~29 GB for KV/prefix cache under the
-  90 GB memory guard (itself below the 96 GB wired ceiling), so the fan-out never
-  pays a swap cost. DFlash SSD cache is
-  disabled on every tier (oMLX #702/#1892).
+- **Model (single workhorse, text-only; ADR-009):** **`coding-workhorse`** —
+  `mlx-community/GLM-4.7-Flash-8bit` (`Glm4MoeLiteForCausalLM`, MoE ~3B active,
+  202K ctx, MLA KV compression — verified on-host ≈ GQA footprint). ~30 GB.
+  **Pinned, sole resident model.** A verified text-only coder build
+  (`*ForCausalLM`, no `vision_config`) and tool-call-verified on oMLX, so it
+  routes to the batched LLM engine with **no engine override**. One pinned model
+  gives the fan-out one shared prefix cache and ~60 GB KV headroom under the
+  90 GB guard (vs ~29 GB with ADR-006's pair) and never exercises oMLX's
+  multi-model swap path. DFlash SSD cache stays disabled (oMLX #702/#1892).
+  **Retired ADR-006 tiers** (`Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`,
+  `Qwen3-Coder-Next-MLX-4bit`) are never downloaded/aliased/validated; setup
+  actively unpins them if a prior install left them pinned. Qwen3-Coder-30B stays
+  on disk as the documented **inactive fallback**. GLM emits a reasoning preamble —
+  tool-bearing requests need `max_tokens ≥ ~200` (validation uses 256).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
-  `--paged-ssd-cache-dir ~/.omlx/cache`, `--hot-cache-max-size 18GB` (oMLX accepts
-  both absolute sizes and percentages; we pin an absolute value ≈ 20% of the guard
-  for a deterministic footprint), `--max-concurrent-requests 16` (oMLX default is
-  8), `--api-key` from the 0600 file.
+  `--paged-ssd-cache-dir ~/.omlx/cache`, `--hot-cache-max-size 24GB` (oMLX accepts
+  both absolute sizes and percentages; we pin an absolute value ≈ 27% of the guard
+  for a deterministic footprint — one model, no second cache to fund),
+  `--max-concurrent-requests 10` (ADR-009 "The Mark": prefill-activation-bound,
+  measured 10 clean @ ~16K ctx; oMLX default is 8), `--api-key` from the 0600 file.
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
   across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
   server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
@@ -126,11 +122,12 @@ best-current-model review.
   creates `~/models`, `~/.omlx/{cache,logs,bin}`; generates the 0600 API key;
   sets + persists the wired limit; installs the start wrapper + LaunchAgent (on-
   demand, RunAtLoad=false) + the `omlxctl` control tool (symlinked onto PATH when
-  the brew bin is writable); downloads the three tiers when **download is opt-in
-  (default off)**, skipping any already present (upgrade-safe); applies aliases +
-  pins via the admin API (`apply_pins`, start→pin→stop) and leaves the server
-  stopped; `--configure-pi` registers the provider with the Pi coding agent.
-  No engine override step — all tiers are text-only (ADR-006).
+  the brew bin is writable); downloads the workhorse model when **download is
+  opt-in (default off)**, skipping it if already present (upgrade-safe); applies
+  the alias + pin — and unpins retired ADR-006 tiers — via the admin API
+  (`apply_pins`, start→pin/unpin→stop) and leaves the server stopped;
+  `--configure-pi` registers the provider with the Pi coding agent.
+  No engine override step — the workhorse is text-only (ADR-009).
 - `templates/` — committed templates the script installs with placeholder
   substitution: `omlx-start-wrapper.sh`, the `com.local.omlx.plist` LaunchAgent,
   the `com.local.iogpu-wired-limit.plist` root LaunchDaemon, `omlxctl` (the
@@ -154,22 +151,22 @@ best-current-model review.
   (`007`). `.markdownlint-cli2.jsonc` configures the markdown step; `.shellcheckrc`
   (both repo root) gates shellcheck at `severity=warning` so the intentional
   `A && B || true` / `((counter++)) || true` idioms (info-level SC2015) don't fail CI.
-- `adrs/` — `006-multi-tier-coresident-lineup-stay-on-omlx.md` records the current
-  model lineup (superseding `004`, which superseded `003` → `002` → `001`; the
-  `--memory-guard-gb`/wired-limit/concurrency from `002` and the oMLX runtime from
-  `001` carry forward); `005-on-demand-service-lifecycle.md` records the on-demand
-  start/stop lifecycle (no login autostart) — additive, still in force under `006`;
+- `adrs/` — `009-mac-single-workhorse-cloud-frontier.md` records the current
+  model lineup (single pinned workhorse, cloud as frontier; implemented via #14),
+  superseding `006` (three-tier lineup — which superseded `004` → `003` → `002`
+  → `001`) and `008` (cross-host AMD routing). The `--memory-guard-gb`/wired-limit
+  from `002` and the oMLX runtime from `001` carry forward;
+  `005-on-demand-service-lifecycle.md` records the on-demand start/stop lifecycle
+  (no login autostart) — still in force under `009`;
   `007-ci-rulesets-and-release-strategy.md` records the CI gate, branch-protection
-  rulesets, and the deferred-`semantic-release` decision;
-  `008-cross-host-routing-integration.md` integrates the second AMD host and
-  AMD-first `coding-fast` routing — additive, extends `006`;
-  `009-mac-single-workhorse-cloud-frontier.md` records the forward-direction
-  single-model workhorse reframe (cloud as frontier) — additive, supersedes
-  nothing yet (implementation tracked in #14); `TEMPLATE.md` is the MADR
-  minimal template for new ADRs (sequential, zero-padded three digits). The model
-  decision rationale lives in `docs/runtime-tiering-research.md`.
+  rulesets, and the deferred-`semantic-release` decision; `TEMPLATE.md` is the
+  MADR minimal template for new ADRs (sequential, zero-padded three digits). The
+  model decision rationale lives in `docs/runtime-tiering-research.md`.
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
   `FallbackInferenceRouter`.
+- `docs/workhorse-probes.md` — one-time on-host probes to run before trusting the
+  workhorse config under load (long-context MLA check, `enable_thinking`
+  pass-through).
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
   Keep it in sync when flags, model IDs, or the step order change.
 
@@ -215,10 +212,11 @@ After the server is up, validate against `http://localhost:8000/v1` (the script'
 5. A `POST /v1/messages` call confirming the Anthropic-style endpoint is reachable.
 
 Anthropic-style clients use `/v1/messages`. The downstream consumer is an
-`IInferenceBackend` / `FallbackInferenceRouter`: `coding-fast` and `coding-balanced`
-→ co-resident local models; `coding-quality` → the local on-demand max tier
-(Qwen3-Coder-Next, lazy-loaded), with a remote backend as fallback (see
-`docs/router-wiring.md`).
+`IInferenceBackend` / `FallbackInferenceRouter`: fast/balanced roles →
+`coding-workhorse` (the single pinned local model); the quality role → the
+**cloud frontier** provider, never a local tier (see `docs/router-wiring.md`).
+Tool-bearing requests need `max_tokens ≥ ~200` — GLM emits a reasoning preamble
+before the tool call (validation uses 256).
 
 ## Teardown
 
@@ -238,11 +236,12 @@ sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 # 3. Uninstall oMLX
 brew uninstall omlx && brew untap jundot/omlx
 
-# 4. Remove data (the API key + cache/logs, and the three model tiers)
+# 4. Remove data (the API key + cache/logs, the workhorse, and any retired
+#    ADR-006 tiers still on disk)
 rm -rf ~/.omlx          # includes the 0600 api-key
+rm -rf ~/models/GLM-4.7-Flash-8bit
 rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
-       ~/models/GLM-4.7-Flash-8bit \
-       ~/models/Qwen3-Coder-Next-MLX-4bit
+       ~/models/Qwen3-Coder-Next-MLX-4bit   # retired tiers, if present
 ```
 
 ## Scripts

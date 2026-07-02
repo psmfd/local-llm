@@ -1,14 +1,13 @@
 # ADR-009: Mac as a single-model subagent workhorse, with the cloud as the frontier
 
-- Status: accepted (forward direction — not yet implemented; tracked in [#14](https://github.com/psmfd/local-llm/issues/14))
-- Date: 2026-06-29
+- Status: accepted
+- Date: 2026-06-29 (implemented 2026-07-02, [#14](https://github.com/psmfd/local-llm/issues/14))
 
-This ADR is **additive and supersedes nothing** (see "Relationship to prior ADRs"
-below). [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md) (three-tier
+Supersedes [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md) (three-tier
 co-resident lineup) and [ADR-008](008-cross-host-routing-integration.md)
-(cross-host AMD routing) remain the record of the currently-implemented state;
-this ADR records a forward direction whose implementation is tracked in
-[#14](https://github.com/psmfd/local-llm/issues/14).
+(cross-host AMD routing) — see "Relationship to prior ADRs" below. Originally
+recorded as an additive forward direction; the supersession became formal when
+the implementation landed via [#14](https://github.com/psmfd/local-llm/issues/14).
 
 ## Context and Problem Statement
 
@@ -136,23 +135,29 @@ this ADR.
     modest.
   - GLM-4.7-Flash's quality figure (59.2% SWE-bench) is weakly sourced; output
     precision on real orchestrator prompts is still to be confirmed in use.
-  - Deferring formal supersession leaves ADR-006/008 co-existing with this record
-    until #14 lands; the intent-vs-implementation split must be read carefully in
-    the interim.
+  - Formal supersession of ADR-006/008 was deferred until the #14 implementation
+    landed (2026-07-02); during the interim the intent-vs-implementation split had
+    to be read carefully.
 
-## Relationship to prior ADRs (additive — supersedes nothing)
+## Relationship to prior ADRs
 
-This ADR is recorded as a **forward direction**, not a supersession. ADR-006
-(three-tier lineup) and ADR-008 (cross-host AMD routing) are left **untouched and
-remain the record of the currently-implemented state** until the gates above pass
-and `setup-omlx-m5.sh` is reworked (#14). The intended end-state this ADR adopts:
+This ADR **supersedes [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md)**
+(three-tier lineup) **and [ADR-008](008-cross-host-routing-integration.md)**
+(cross-host AMD routing):
 
 - the **Mac single-workhorse absorbs the local executor / `coding-fast` role**,
-- the **AMD appliance (ADR-008) is repurposed or deprecated**, and
+- the **AMD appliance (ADR-008) is repurposed or deprecated** (its hardware was
+  never built; the cross-host design is shelved with it), and
 - the **cloud provider becomes the frontier / quality tier** in the
   `FallbackInferenceRouter`.
 
-Formal supersession of ADR-006/008 is **deferred to the implementation PR (#14)**
-so the record does not assert a teardown ahead of the validated change. Until
-then, a reader should treat ADR-009 as the current *intent* and ADR-006/008 as
-the current *implementation*.
+ADR-002's `--memory-guard-gb 90` / 96 GB wired limit and ADR-001's oMLX runtime
+choice carry forward unchanged, as they did through ADR-006. ADR-005's on-demand
+lifecycle remains in force.
+
+Historical note: this ADR was originally recorded (2026-06-29) as an *additive
+forward direction* that deliberately superseded nothing, so the record would not
+assert a teardown ahead of the validated change. The supersession became formal
+when the implementation — the `setup-omlx-m5.sh` single-model rework and full doc
+sync — landed via [#14](https://github.com/psmfd/local-llm/issues/14) on
+2026-07-02.

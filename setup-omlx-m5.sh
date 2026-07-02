@@ -12,9 +12,11 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the three model tiers (~105 GB total) via
-#                      `hf download`. Off by default. Existing models are skipped,
-#                      so this is safe to re-run when upgrading.
+#   --download-model   Download the coding-workhorse model (~30 GB) via
+#                      `hf download`. Off by default. Retired ADR-006 tiers are
+#                      never downloaded. Existing model dirs are skipped (never
+#                      re-downloaded or deleted), so this is safe to re-run when
+#                      upgrading.
 #   --configure-pi     Register the oMLX provider with the Pi coding agent.
 #                      Auto-writes ~/.pi/agent/models.json ONLY when its
 #                      providers object is empty (backup taken first);
@@ -78,40 +80,59 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=140         # T1+T2 (~60 GB) + on-demand MAX (~45 GB) + paged-SSD cache headroom (ADR-006)
+MIN_DISK_GB=60          # GLM-4.7-Flash-8bit (~30 GB) + hf staging/logs headroom (ADR-009).
+                        # Gates required FREE space only — retired ADR-006 tiers
+                        # already on disk are sunk cost, not part of this floor.
 
-# --- Model tiers (ADR-006) --------------------------------------------------
-# Three tiers, all verified TEXT-ONLY MLX coder builds (no vision_config → batched
-# LLM engine, concurrency-safe, no engine override) and tool-call-verified on oMLX:
-#   T1  coding-fast     Qwen3-Coder-30B-A3B-8bit   (~30.6 GB)  PINNED, co-resident
-#   T2  coding-balanced GLM-4.7-Flash-8bit         (~30 GB)    PINNED, co-resident
-#   MAX coding-quality  Qwen3-Coder-Next-4bit      (~45 GB)    on-demand (lazy-load, NOT pinned)
-# T1+T2 stay co-resident under the 96 GB wired ceiling with KV headroom; MAX is
-# lazy-loaded on first request and TTL-evicts when idle (never co-resident — it
-# does not fit alongside T1+T2). Repo IDs verified against HuggingFace config.json
-# on 2026-06-24; re-probed before each download. Confirm the best current models
-# before large downloads. See docs/runtime-tiering-research.md.
+# --- Model lineup (ADR-009: single Mac workhorse, cloud is the frontier) -----
+# ADR-006's three co-resident/on-demand tiers are retired: the cloud provider is
+# now the quality frontier and the Mac's only job is to serve a homogeneous
+# subagent fan-out from ONE pinned model, maximizing shared prefix-cache reuse
+# and KV headroom (~60 GB vs ADR-006's ~29 GB under the 90 GB guard). The model
+# is a verified TEXT-ONLY MLX coder build (no vision_config → batched LLM engine,
+# no engine override) and tool-call-verified on oMLX. Repo ID verified against
+# HuggingFace config.json 2026-06-29 (ADR-009); re-probed before download.
+# See adrs/009-mac-single-workhorse-cloud-frontier.md (decision) and
+# docs/runtime-tiering-research.md (model-selection research).
 #
-# Each TIER_MODELS entry is "repo|alias|pinned(true|false)" — order is T1, T2, MAX.
-# Bash-3.2-safe indexed array (macOS default shell).
+# TIER_MODELS holds exactly one entry, "repo|alias|pinned(true|false)", so every
+# existing loop (download, pi-config, pin/alias, validate) works unchanged over a
+# 1-element, Bash-3.2-safe indexed array (macOS default shell).
 TIER_MODELS=(
-    "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast|true"
-    "mlx-community/GLM-4.7-Flash-8bit|coding-balanced|true"
-    "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality|false"
+    "mlx-community/GLM-4.7-Flash-8bit|coding-workhorse|true"
 )
-# T1's alias drives the detailed validation probes below (chat/tool/concurrency).
-PRIMARY_ALIAS="coding-fast"
+# The workhorse's alias drives the detailed validation probes below
+# (chat/tool/concurrency).
+PRIMARY_ALIAS="coding-workhorse"
 
-# Field accessors for a TIER_MODELS entry (split on '|').
+# RETIRED_MODELS: ADR-006 tiers this script no longer downloads, aliases, or
+# validates. Entries stay on disk (never deleted); Qwen3-Coder-30B remains the
+# documented INACTIVE fallback should GLM ever regress (ADR-009). apply_pins
+# actively clears is_pinned/dflash on these — only when they already exist in
+# oMLX's model_settings.json — so an upgraded ADR-006 host actually frees the
+# memory it was holding for them. Format: "repo|old_alias" (2 fields — no pin
+# field; the action is always force-unpin). The old alias is echoed back
+# unchanged in the unpin PUT body rather than cleared, because the admin PUT's
+# replace-vs-merge semantics for omitted fields are unverified; a stale alias on
+# an unpinned model is inert (no configured client requests it).
+RETIRED_MODELS=(
+    "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast"
+    "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality"
+)
+
+# Field accessors for a TIER_MODELS/RETIRED_MODELS entry (split on '|').
+# tier_pin() is only meaningful on TIER_MODELS entries — RETIRED_MODELS entries
+# have no third field; never read a pin flag from them.
 tier_repo()  { printf '%s' "${1%%|*}"; }
 tier_alias() { local r="${1#*|}"; printf '%s' "${r%%|*}"; }
 tier_pin()   { printf '%s' "${1##*|}"; }
 tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 
-# Pi coding-agent provider registration (--configure-pi). contextWindow is half
-# the model's 262144-token native context (verified config.json, rope_scaling
-# null): 16 concurrent sessions at full context would overrun the KV/wired budget
-# and collapse prefix-cache reuse (ADR-004).
+# Pi coding-agent provider registration (--configure-pi). contextWindow stays at
+# 131072 — comfortably inside GLM-4.7-Flash's 202K native context while keeping
+# the fan-out honest: safe concurrency is prefill-activation-bound and falls as
+# context grows (ADR-009 "The Mark": 10 @ ~16K ctx), so clients should not be
+# invited to fill the full native window.
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 PI_CONTEXT_WINDOW=131072
 PI_MAX_TOKENS=16384
@@ -591,15 +612,16 @@ maybe_download_models() {
             [ -d "$(tier_dir "$entry")" ] && { ((present++)) || true; }
         done
         if [ "$present" -eq 0 ]; then
-            record_warn "model" "download is opt-in and no model is on disk — the server will serve ZERO models until you run: ./setup-omlx-m5.sh --download-model (then pin/alias in /admin)"
+            record_warn "model" "download is opt-in and the workhorse model is not on disk — the server will serve ZERO models until you run: ./setup-omlx-m5.sh --download-model (then pin/alias in /admin)"
         else
-            skip "model" "download is opt-in — ${present} tier(s) already on disk; re-run with --download-model to fetch the rest, or use the /admin downloader"
+            skip "model" "download is opt-in — workhorse model already on disk"
         fi
         return
     fi
-    # All three ADR-006 tiers. download_model() skips any dir that is already
-    # populated, so on an upgrade from a single-model (ADR-004) install only the
-    # missing tiers are fetched.
+    # Only the ADR-009 workhorse is fetched. Retired ADR-006 tiers are never
+    # downloaded (Qwen3-Coder-30B stays on disk as the inactive fallback if a
+    # prior install put it there). download_model() skips a populated dir, so an
+    # upgrade re-run fetches nothing it already has.
     local entry
     for entry in "${TIER_MODELS[@]}"; do
         download_model "$(tier_repo "$entry")" "$(tier_dir "$entry")" "model-$(tier_alias "$entry")"
@@ -615,7 +637,7 @@ maybe_download_models() {
 print_pi_settings_instructions() {
     local settings_file="$1"
     # settings.json is hand-curated and git-tracked; never edited automatically.
-    info "To surface the tiers in Pi's picker, add to the enabledModels array in $settings_file:"
+    info "To surface the workhorse in Pi's picker, add to the enabledModels array in $settings_file:"
     local entry
     for entry in "${TIER_MODELS[@]}"; do
         echo "      \"omlx/$(tier_alias "$entry")\""
@@ -638,18 +660,14 @@ configure_pi_provider() {
     local models_file="$PI_AGENT_DIR/models.json"
     local settings_file="$PI_AGENT_DIR/settings.json"
     local snippet_dest="$OMLX_HOME/pi-provider-snippet.json"
-    # Register the tiers by their oMLX aliases (ADR-006).
-    local t1_id t2_id max_id
-    t1_id="$(tier_alias "${TIER_MODELS[0]}")"
-    t2_id="$(tier_alias "${TIER_MODELS[1]}")"
-    max_id="$(tier_alias "${TIER_MODELS[2]}")"
+    # Register the workhorse by its oMLX alias (ADR-009).
+    local model_id
+    model_id="$(tier_alias "${TIER_MODELS[0]}")"
 
     if render_template "$TEMPLATE_DIR/pi-models-omlx.json" "$snippet_dest" \
         "__PORT__"              "$PORT" \
         "__API_KEY_FILE__"      "$API_KEY_FILE" \
-        "__T1_ID__"             "$t1_id" \
-        "__T2_ID__"             "$t2_id" \
-        "__MAX_ID__"            "$max_id" \
+        "__MODEL_ID__"          "$model_id" \
         "__PI_CONTEXT_WINDOW__" "$PI_CONTEXT_WINDOW" \
         "__PI_MAX_TOKENS__"     "$PI_MAX_TOKENS"; then
         ok "pi-config" "rendered provider snippet: $snippet_dest"
@@ -708,29 +726,61 @@ PYEOF
 
 # --- Pin/alias fallback instructions (when the admin API can't be reached) --
 print_pin_instructions() {
-    # Printed when apply_pins cannot reach the admin API. Lists every tier so the
-    # operator can set aliases + pins manually in the admin panel.
-    info "Apply model aliases + pins manually in the admin panel:"
+    # Printed when apply_pins cannot reach the admin API, so the operator can
+    # set the workhorse alias/pin — and clear any retired ADR-006 pins —
+    # manually in the admin panel.
+    info "Apply the workhorse alias + pin manually in the admin panel:"
     echo "      1. Start the server (omlxctl start), then open http://localhost:${PORT}/admin"
-    echo "      2. Under Models, for each tier set the alias and pin state:"
+    echo "      2. Under Models, set the alias and pin state:"
     local entry
     for entry in "${TIER_MODELS[@]}"; do
-        if [ "$(tier_pin "$entry")" = "true" ]; then
-            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  PIN (keep co-resident)"
-        else
-            echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  do NOT pin (on-demand; set idle TTL if desired)"
-        fi
+        echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  PIN (sole resident model)"
+    done
+    echo "      3. If upgrading from the ADR-006 three-tier install, also UNPIN the retired tiers"
+    echo "         (leave them on disk — Qwen3-Coder-30B is the documented inactive fallback):"
+    local r
+    for r in "${RETIRED_MODELS[@]}"; do
+        echo "         - $(basename "$(tier_repo "$r")")  UNPIN (clear is_pinned; DFlash off)"
     done
     echo "      Aliases/pins persist in ${OMLX_HOME}/model_settings.json and appear in GET /v1/models."
-    echo "      No engine override is needed — all tiers are text-only coder builds (ADR-006)."
+    echo "      No engine override is needed — the workhorse is a text-only coder build (ADR-009)."
 }
 
-# Idempotency gate: returns 0 if model_settings.json already has every tier's
-# alias and pin state. We only READ the oMLX-owned file here. Lets a re-run skip
-# the whole start/pin/stop cycle (no server churn) — key for upgrade re-runs.
-pins_already_applied() {
+# retired_model_state REPO — reads the LOCAL oMLX-owned model_settings.json
+# (never the server) and prints:
+#   absent  oMLX has never registered this model — no PUT should be sent
+#           (retired tiers are never actively aliased/registered by us)
+#   dirty   present and still is_pinned or dflash_ssd_cache — needs an unpin PUT
+#   clean   present and already unpinned/dflash-off — nothing to do
+# Shared by pins_converged (gate) and apply_pins (action) — one source of truth.
+retired_model_state() {
+    local repo="$1"
+    [ -f "$OMLX_HOME/model_settings.json" ] || { printf 'absent'; return; }
+    python3 - "$OMLX_HOME/model_settings.json" "$(basename "$repo")" <<'PYEOF' 2>/dev/null || printf 'absent'
+import json, sys
+try:
+    models = json.load(open(sys.argv[1])).get("models", {})
+except Exception:
+    print("absent"); sys.exit(0)
+m = models.get(sys.argv[2])
+if not m:
+    print("absent")
+elif bool(m.get("is_pinned")) or bool(m.get("dflash_ssd_cache")):
+    print("dirty")
+else:
+    print("clean")
+PYEOF
+}
+
+# Idempotency gate: returns 0 only when the host is fully converged on ADR-009 —
+# the workhorse has its alias + pin in model_settings.json AND no retired
+# ADR-006 tier is still pinned (absent-or-clean). An upgraded host with a
+# retired tier still pinned is NOT converged, so the unpin pass runs; a
+# converged host skips the whole start/pin/stop cycle (no server churn).
+# We only READ the oMLX-owned file here.
+pins_converged() {
     [ -f "$OMLX_HOME/model_settings.json" ] || return 1
-    python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null
+    if ! python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null
 import json, os, sys
 try:
     models = json.load(open(sys.argv[1])).get("models", {})
@@ -743,15 +793,24 @@ for t in sys.argv[2:]:
         sys.exit(1)
 sys.exit(0)
 PYEOF
+    then
+        return 1
+    fi
+    local r
+    for r in "${RETIRED_MODELS[@]}"; do
+        [ "$(retired_model_state "$(tier_repo "$r")")" = "dirty" ] && return 1
+    done
+    return 0
 }
 
-# --- Pin/alias via the oMLX admin API (ADR-006) -----------------------------
-# Sets each tier's alias + pin state by briefly starting the server, PUTting the
-# per-model settings, then stopping it — so ADR-005's end-state invariant (server
-# stopped after setup, no login autostart) is preserved. model_settings.json is
-# oMLX-owned, so we go through the admin API rather than writing the file. The
-# admin mount prefix is probed (it has drifted between /admin/api and /api). The
-# whole step degrades to print_pin_instructions + a warning — never a hard failure.
+# --- Pin/alias via the oMLX admin API (ADR-009) -----------------------------
+# Sets the workhorse alias + pin — and clears any retired ADR-006 tier pins — by
+# briefly starting the server, PUTting the per-model settings, then stopping it,
+# so ADR-005's end-state invariant (server stopped after setup, no login
+# autostart) is preserved. model_settings.json is oMLX-owned, so we go through
+# the admin API rather than writing the file. The admin mount prefix is probed
+# (it has drifted between /admin/api and /api). The whole step degrades to
+# print_pin_instructions + a warning — never a hard failure.
 apply_pins() {
     if ! $OMLX_PRESENT; then
         record_warn "pin" "omlx not installed — skipping admin pinning; re-run after installing omlx"
@@ -761,16 +820,20 @@ apply_pins() {
         record_warn "pin" "API key not readable — skipping admin pinning"
         print_pin_instructions; return
     fi
-    local any_present=false entry
+    local workhorse_present=false entry
     for entry in "${TIER_MODELS[@]}"; do
-        if [ -d "$(tier_dir "$entry")" ] && [ -n "$(ls -A "$(tier_dir "$entry")" 2>/dev/null)" ]; then any_present=true; fi
+        if [ -d "$(tier_dir "$entry")" ] && [ -n "$(ls -A "$(tier_dir "$entry")" 2>/dev/null)" ]; then workhorse_present=true; fi
     done
-    if ! $any_present; then
-        skip "pin" "no tier models on disk yet — download them (--download-model), then re-run to apply pins"
+    # If nothing is on disk AND oMLX has no model_settings.json, there is nothing
+    # to pin and nothing to unpin — skip without a server start. Do NOT gate on
+    # the workhorse alone: a prior ADR-006 install may still hold retired-tier
+    # pins that need clearing even before the workhorse is downloaded.
+    if ! $workhorse_present && [ ! -f "$OMLX_HOME/model_settings.json" ]; then
+        skip "pin" "workhorse not on disk and no model_settings.json — download it (--download-model), then re-run to apply pins"
         print_pin_instructions; return
     fi
-    if pins_already_applied; then
-        skip "pin" "all tier aliases + pins already set in model_settings.json (no server start needed)"
+    if pins_converged; then
+        skip "pin" "workhorse alias + pin set and no retired-tier pins to clear (no server start needed)"
         return
     fi
 
@@ -820,8 +883,7 @@ apply_pins() {
         alias="$(tier_alias "$entry")"
         pin="$(tier_pin "$entry")"
         if [ ! -d "$(tier_dir "$entry")" ]; then skip "pin-${alias}" "model ${mid} not on disk — skipping"; continue; fi
-        # PINNED tiers (T1/T2): co-resident, DFlash off. MAX tier: not pinned,
-        # idle-evict after 15 min, DFlash off (oMLX #702/#1892).
+        # The workhorse: sole resident model, pinned, DFlash off (oMLX #702/#1892).
         if [ "$pin" = "true" ]; then
             body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"dflash_ssd_cache\":false}"
         else
@@ -833,6 +895,34 @@ apply_pins() {
         else
             record_warn "pin-${alias}" "admin PUT failed for ${mid} — set alias/pin manually at ${base}/admin"
         fi
+    done
+    if ! $workhorse_present; then
+        record_warn "pin" "workhorse model not on disk — download it with --download-model, then re-run to pin it (any retired-tier memory was still freed this run)"
+    fi
+
+    # Retired ADR-006 tiers: force-unpin whatever a prior install left pinned so
+    # the upgraded host actually frees the memory (ADR-009). Only entries already
+    # registered in model_settings.json are touched; the old alias is echoed back
+    # unchanged (see RETIRED_MODELS comment) and ttl_seconds bounds any
+    # accidental load of the now-unpinned model.
+    local r rmid rstate ralias
+    for r in "${RETIRED_MODELS[@]}"; do
+        rmid="$(basename "$(tier_repo "$r")")"
+        ralias="$(tier_alias "$r")"
+        rstate="$(retired_model_state "$(tier_repo "$r")")"
+        case "$rstate" in
+            absent) skip "unpin-${rmid}" "not in model_settings.json — never registered, nothing to unpin" ;;
+            clean)  skip "unpin-${rmid}" "already unpinned (DFlash off)" ;;
+            dirty)
+                body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+                if curl -fsS --max-time 20 -X PUT -H "$auth" -H 'Content-Type: application/json' \
+                    -d "$body" "${base}${admin}/models/${rmid}/settings" >/dev/null 2>&1; then
+                    ok "unpin-${rmid}" "retired tier unpinned (stays on disk; memory freed on next start)"
+                else
+                    record_warn "unpin-${rmid}" "admin PUT failed — unpin ${rmid} manually at ${base}/admin"
+                fi
+                ;;
+        esac
     done
 
     if $started_by_us; then
@@ -861,8 +951,7 @@ validate_endpoint() {
     if models="$(curl -fsS -H "$auth" "${base}/models" 2>/dev/null)"; then
         ok "validate-models" "GET /v1/models reachable"
         detail "$models"
-        # Every tier alias should be registered. The MAX tier (coding-quality) is
-        # on-demand: it is listed once discovered, but only loads on first request.
+        # The workhorse alias should be registered (single pinned model, ADR-009).
         local entry valias
         for entry in "${TIER_MODELS[@]}"; do
             valias="$(tier_alias "$entry")"
@@ -872,14 +961,27 @@ validate_endpoint() {
                 record_warn "validate-alias" "alias '${valias}' not found — apply pins (re-run setup) or set it in /admin"
             fi
         done
+        # No retired ADR-006 tier should still be pinned — a leftover pin holds
+        # ~30-45 GB that the fan-out's KV headroom is supposed to get (ADR-009).
+        local r rmid
+        for r in "${RETIRED_MODELS[@]}"; do
+            rmid="$(basename "$(tier_repo "$r")")"
+            if [ "$(retired_model_state "$(tier_repo "$r")")" = "dirty" ]; then
+                record_warn "validate-retired" "retired model ${rmid} is still pinned/DFlash-on — re-run setup to free its memory"
+            else
+                ok "validate-retired" "retired model ${rmid} not pinned"
+            fi
+        done
     else
         record_err "validate-models" "GET /v1/models failed — is the server running? (launchctl print gui/$(id -u)/${AGENT_LABEL})"
         return
     fi
 
-    # 2. chat completion
+    # 2. chat completion. max_tokens >= ~200 everywhere: GLM-4.7-Flash emits a
+    # reasoning preamble before the answer/tool call and 120 tokens truncated
+    # mid-call in testing (ADR-009).
     local chat_req chat_resp
-    chat_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":16}'
+    chat_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":256}'
     if chat_resp="$(curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" 2>/dev/null)"; then
         ok "validate-chat" "POST /v1/chat/completions returned a response"
         detail "$chat_resp"
@@ -889,7 +991,7 @@ validate_endpoint() {
 
     # 3. tool-calling
     local tool_req tool_resp
-    tool_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"What files are in the current directory? Use the tool."}],"tools":[{"type":"function","function":{"name":"list_dir","description":"List files in a directory","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"tool_choice":"auto","max_tokens":128}'
+    tool_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"What files are in the current directory? Use the tool."}],"tools":[{"type":"function","function":{"name":"list_dir","description":"List files in a directory","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"tool_choice":"auto","max_tokens":256}'
     if tool_resp="$(curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$tool_req" "${base}/chat/completions" 2>/dev/null)"; then
         if echo "$tool_resp" | grep -q 'tool_calls'; then
             ok "validate-tools" "model emitted tool_calls markup"
@@ -917,7 +1019,7 @@ validate_endpoint() {
 
     # 5. Anthropic-style messages endpoint (spec requires /v1/messages reachability)
     local msg_req msg_resp
-    msg_req='{"model":"'"$PRIMARY_ALIAS"'","max_tokens":16,"messages":[{"role":"user","content":"Reply with the single word: pong"}]}'
+    msg_req='{"model":"'"$PRIMARY_ALIAS"'","max_tokens":256,"messages":[{"role":"user","content":"Reply with the single word: pong"}]}'
     if msg_resp="$(curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$msg_req" "http://localhost:${PORT}/v1/messages" 2>/dev/null)"; then
         ok "validate-messages" "POST /v1/messages (Anthropic-style) reachable"
         detail "$msg_resp"

@@ -1,6 +1,6 @@
 # ADR-008: Integrate the AMD vLLM appliance as a co-equal peer backend — AMD-first for `coding-fast`
 
-- Status: accepted
+- Status: superseded by [ADR-009](009-mac-single-workhorse-cloud-frontier.md)
 - Date: 2026-06-28
 
 Extends [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md), which
