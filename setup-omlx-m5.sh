@@ -375,7 +375,12 @@ install_wired_limit() {
         ok "wired-daemon" "installed $DAEMON_PLIST (root:wheel 0644)"
     fi
 
-    if sudo launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
+    # Loaded-check without sudo first: `launchctl print system/<label>` is
+    # readable unprivileged, and a sudo-wrapped check fails under NON-INTERACTIVE
+    # sudo even when the job IS loaded — which then mis-fires a bootstrap attempt
+    # and records a spurious error on an already-converged host.
+    if launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1 \
+        || sudo launchctl print "system/${DAEMON_LABEL}" >/dev/null 2>&1; then
         skip "wired-daemon" "LaunchDaemon already loaded"
     else
         if sudo launchctl bootstrap system "$DAEMON_PLIST"; then
