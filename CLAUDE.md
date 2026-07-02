@@ -100,7 +100,8 @@ best-current-model review.
     (lazy-loads ~16 s on first request, idle-evicts; NOT pinned — it does not
     co-reside alongside T1+T2 under the wired ceiling).
   T1+T2 stay co-resident (~60 GB) leaving ~29 GB for KV/prefix cache under the
-  96 GB wired ceiling, so the fan-out never pays a swap cost. DFlash SSD cache is
+  90 GB memory guard (itself below the 96 GB wired ceiling), so the fan-out never
+  pays a swap cost. DFlash SSD cache is
   disabled on every tier (oMLX #702/#1892).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
