@@ -28,9 +28,9 @@ over single-stream tok/s). You return advice and exact commands; you never modif
 - `omlx serve` flags: `--host` (pin `127.0.0.1`), `--port` (default `8000`),
   `--model-dir`, `--memory-guard-gb` (replaced the removed `--max-process-memory`;
   caps Metal allocations, not total RSS), `--paged-ssd-cache-dir`,
-  `--hot-cache-max-size` (**accepts both absolute sizes like `18GB` and percentages
-  like `20%`**), `--max-concurrent-requests` (**default 8**; this project sets 16),
-  `--api-key`.
+  `--hot-cache-max-size` (**accepts both absolute sizes like `24GB` and percentages
+  like `20%`**), `--max-concurrent-requests` (**default 8**; this project sets 10 —
+  ADR-009 "The Mark"), `--api-key`.
 - Endpoints: OpenAI `GET /v1/models`, `POST /v1/chat/completions`; Anthropic
   `POST /v1/messages`.
 - Admin panel at `/admin`; per-model `model_type_override`
@@ -43,8 +43,9 @@ over single-stream tok/s). You return advice and exact commands; you never modif
   engine, which **crashes on the second concurrent request** (oMLX issue #1800, open).
 - Mitigation if such a model is unavoidable: set `model_type_override = llm`. The
   far better choice is a **text-only checkpoint** (`*ForCausalLM`, no `vision_config`)
-  so no override is needed. This repo deliberately ships only the text-only
-  Qwen3-Coder build for exactly this reason.
+  so no override is needed. This repo deliberately serves only verified text-only
+  coder builds (the ADR-009 GLM workhorse; previously the Qwen3-Coder tiers) for
+  exactly this reason.
 - Always inspect a candidate's `config.json` (`architectures`, `vision_config`)
   *before* downloading. Every MLX repack of a natively-multimodal model (e.g. any
   Qwen3.6-35B-A3B repo, mlx-community **or** unsloth) carries the trap.
@@ -52,8 +53,11 @@ over single-stream tok/s). You return advice and exact commands; you never modif
 ### Model selection (128 GB, parallel coding agents)
 
 - Prefer text-only coder MoE models with strong native tool-calling and large
-  context. Current pick: `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`
-  (~32 GB, `Qwen3MoeForCausalLM`, 262,144 native context, `rope_scaling: null`).
+  context. Current pick (ADR-009 workhorse): `mlx-community/GLM-4.7-Flash-8bit`
+  (~30 GB, `Glm4MoeLiteForCausalLM`, 202K native context, MLA KV compression —
+  verified ≈ GQA footprint on oMLX). Verified fallback kept on disk:
+  `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` (~30.6 GB,
+  `Qwen3MoeForCausalLM`, GQA, 262,144 native context, `rope_scaling: null`).
 - A single resident model maximizes the KV/prefix-cache budget under the wired
   ceiling; co-residency of two large models roughly halves it.
 - Will **not** fit 128 GB: `Qwen3-Coder-480B-A35B` (~540 GB @ 8-bit), Kimi K2.x

@@ -1,6 +1,6 @@
 # ADR-006: Restore a multi-tier lineup — two co-resident pinned tiers + one on-demand max tier, staying on oMLX
 
-- Status: accepted
+- Status: superseded by [ADR-009](009-mac-single-workhorse-cloud-frontier.md)
 - Date: 2026-06-24
 
 Supersedes [ADR-004](004-single-text-only-model-no-override.md) for the model
@@ -11,6 +11,12 @@ concurrency (`--max-concurrent-requests 16`), and the runtime from ADR-001 all
 carry forward unchanged. The full investigation behind this decision is recorded in
 [docs/runtime-tiering-research.md](../docs/runtime-tiering-research.md) (Parts 1–6),
 including an on-host bake-off on the M5 Max target.
+
+**Extended by [ADR-008](008-cross-host-routing-integration.md):** the abstract remote
+`coding-quality`/fallback backend is concretized as an always-on AMD vLLM appliance,
+and router ordering is revised to **AMD-first for `coding-fast`** (a second endpoint).
+ADR-006's lineup, co-resident pinning, wired limit, and single-host oMLX serving are
+**unchanged on the Mac** — ADR-008 adds the second host, it does not supersede this one.
 
 ## Context and Problem Statement
 

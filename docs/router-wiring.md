@@ -1,21 +1,20 @@
 # Wiring oMLX into the .NET `IInferenceBackend` / `FallbackInferenceRouter`
 
 This note shows how to register the local oMLX server as one `IInferenceBackend`
-behind your `FallbackInferenceRouter`, routing the three local tiers
-(`coding-fast`, `coding-balanced`, `coding-quality`) → oMLX and falling through to
-a remote backend on failure or saturation.
+behind your `FallbackInferenceRouter`, routing the executor roles to the single
+local **workhorse** (`coding-workhorse`, [ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md))
+and the quality role to a **cloud frontier** backend.
 
 - **Endpoint:** `http://localhost:8000/v1` (OpenAI-style `POST /v1/chat/completions`).
   oMLX also serves Anthropic-style `POST /v1/messages`; this note uses the
   OpenAI chat-completions shape.
 - **Auth:** bearer key read once at startup from `OMLX_API_KEY`, else from the
   0600 file `~/.omlx/api-key`. **Never hardcode the key.**
-- **Aliases:** the `model` field carries the oMLX alias. This host serves three
-  tiers ([ADR-006](../adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)):
-  `coding-fast` + `coding-balanced` are pinned co-resident; `coding-quality` is the
-  **on-demand** max tier (Qwen3-Coder-Next, lazy-loaded ~16 s on first request).
-  Keep a remote backend as the fallback after the local tiers. Aliases/pins are
-  applied by `setup-omlx-m5.sh` via the admin API.
+- **Aliases:** the `model` field carries the oMLX alias. This host serves one
+  pinned model ([ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md)):
+  `coding-workhorse` (GLM-4.7-Flash-8bit, sole resident). The high-fidelity
+  quality role is **not served locally** — it routes to the cloud frontier.
+  The alias/pin is applied by `setup-omlx-m5.sh` via the admin API.
 - **Concurrency:** typed `HttpClient` via `IHttpClientFactory` +
   `AddStandardResilienceHandler` so a local hiccup degrades into the fallback
   router rather than throwing.
@@ -31,7 +30,9 @@ a remote backend on failure or saturation.
 ```csharp
 public enum ModelRole { Fast, Balanced, Quality }
 public sealed record ChatMessage(string Role, string Content);
-public sealed record InferenceRequest(ModelRole Role, IReadOnlyList<ChatMessage> Messages, float? Temperature = null);
+// MaxTokens: tool-bearing requests against the workhorse need >= ~200 (GLM emits
+// a reasoning preamble before the tool call — ADR-009); expose it end-to-end.
+public sealed record InferenceRequest(ModelRole Role, IReadOnlyList<ChatMessage> Messages, float? Temperature = null, int? MaxTokens = null);
 public sealed record InferenceResponse(string Content, bool IsAvailable);
 
 public sealed class InferenceUnavailableException(string message, Exception? inner = null)
@@ -97,19 +98,21 @@ internal sealed record OmlxMessage([property: JsonPropertyName("role")] string R
                                    [property: JsonPropertyName("content")] string Content);
 internal sealed record OmlxChatRequest([property: JsonPropertyName("model")] string Model,
                                        [property: JsonPropertyName("messages")] IReadOnlyList<OmlxMessage> Messages,
-                                       [property: JsonPropertyName("temperature"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] float? Temperature);
+                                       [property: JsonPropertyName("temperature"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] float? Temperature,
+                                       [property: JsonPropertyName("max_tokens"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaxTokens);
 internal sealed record OmlxChoice([property: JsonPropertyName("message")] OmlxMessage Message);
 internal sealed record OmlxChatResponse([property: JsonPropertyName("choices")] IReadOnlyList<OmlxChoice> Choices);
 
 public sealed class OmlxInferenceBackend(HttpClient httpClient, ILogger<OmlxInferenceBackend> logger)
     : IInferenceBackend
 {
-    // Logical role → oMLX model alias (the "model" field).
+    // Logical role → oMLX model alias (the "model" field). Executor roles all
+    // map to the single pinned workhorse (ADR-009). Quality is deliberately
+    // ABSENT: the role must fall through to the cloud frontier backend.
     private static readonly Dictionary<ModelRole, string> ModelAliases = new()
     {
-        [ModelRole.Fast]     = "coding-fast",
-        [ModelRole.Balanced] = "coding-balanced",
-        [ModelRole.Quality]  = "coding-quality",   // on-demand: first call lazy-loads (~16 s)
+        [ModelRole.Fast]     = "coding-workhorse",   // single GLM-4.7-Flash alias
+        [ModelRole.Balanced] = "coding-workhorse",
     };
 
     // No global DefaultIgnoreCondition: the property-level [JsonIgnore] on the
@@ -121,13 +124,17 @@ public sealed class OmlxInferenceBackend(HttpClient httpClient, ILogger<OmlxInfe
 
     public async Task<InferenceResponse> CompleteAsync(InferenceRequest request, CancellationToken ct = default)
     {
+        // A role this backend does not serve (Quality) must throw
+        // InferenceUnavailableException — NOT ArgumentOutOfRangeException — or the
+        // FallbackInferenceRouter never advances to the cloud frontier backend.
         if (!ModelAliases.TryGetValue(request.Role, out string? alias))
-            throw new ArgumentOutOfRangeException(nameof(request), request.Role, "No oMLX alias for role.");
+            throw new InferenceUnavailableException($"oMLX does not serve the {request.Role} role.");
 
         var wire = new OmlxChatRequest(
             alias,
             request.Messages.Select(m => new OmlxMessage(m.Role, m.Content)).ToList(),
-            request.Temperature);
+            request.Temperature,
+            request.MaxTokens);
 
         try
         {
@@ -218,9 +225,10 @@ builder.Services.AddHttpClient<OmlxInferenceBackend>((sp, client) =>
 builder.Services.AddTransient<IInferenceBackend>(
     static sp => sp.GetRequiredService<OmlxInferenceBackend>());
 
-// 3. Other backends follow the same concrete-client + transient-bridge pattern:
-// builder.Services.AddHttpClient<RemoteAnthropicBackend>(/* ... */).AddStandardResilienceHandler(/* ... */);
-// builder.Services.AddTransient<IInferenceBackend>(static sp => sp.GetRequiredService<RemoteAnthropicBackend>());
+// 3. The cloud frontier backend (serves the Quality role; also the fallback for
+//    the executor roles) follows the same concrete-client + transient-bridge pattern:
+// builder.Services.AddHttpClient<CloudFrontierBackend>(/* ... */).AddStandardResilienceHandler(/* ... */);
+// builder.Services.AddTransient<IInferenceBackend>(static sp => sp.GetRequiredService<CloudFrontierBackend>());
 
 // 4. The router consumes IEnumerable<IInferenceBackend>. Register it Transient (or
 //    Scoped) — never Singleton, or it captures the transient backends and defeats
@@ -228,20 +236,90 @@ builder.Services.AddTransient<IInferenceBackend>(
 builder.Services.AddTransient<FallbackInferenceRouter>();
 ```
 
-## Router ordering
+## Router ordering (ADR-009)
 
-- **Order = priority.** Register oMLX first; the router iterates registration
-  order, so the local backend is primary for every role. It catches
+- **Order = priority.** Register oMLX first, the cloud frontier backend second;
+  the router iterates registration order. It catches
   `InferenceUnavailableException` and advances to the next backend.
-- **Role routing.** All three roles map through the alias dictionary to local oMLX
-  tiers (ADR-006). `coding-fast` and `coding-balanced` are pinned co-resident, so
-  they answer immediately. `coding-quality` (Qwen3-Coder-Next) is **on-demand**:
-  oMLX lazy-loads it on the first request (~16 s), so that call is slow — size the
-  resilience `AttemptTimeout` to tolerate it, or pre-warm with a throwaway request.
-  If a tier ever errors (e.g. transient load failure) it is wrapped as
-  `InferenceUnavailableException` → fallback to the next backend.
-- **Saturation.** oMLX runs at `--max-concurrent-requests 16`; a 429 trips the
-  circuit breaker, diverting traffic to the remote backend until it recovers.
+- **Role routing.** `Fast` / `Balanced` → **Mac oMLX workhorse** primary → cloud
+  fallback. `Quality` → oMLX throws `InferenceUnavailableException` (no local
+  quality tier — the alias dictionary omits the role) → **cloud frontier**.
+- **Saturation.** oMLX runs at `--max-concurrent-requests 10` (**"The Mark"**,
+  validated on-host; the safe ceiling falls as shared-prefix context grows —
+  clean to N≥15 @ ~9K ctx but 10 @ ~16K, so keep subagent prefixes modest).
+  A 429 or a memory-guard 500 trips the circuit breaker, diverting traffic to
+  the cloud frontier until the local server recovers.
+- **max_tokens.** GLM-4.7-Flash emits a **reasoning preamble before tool calls**;
+  set `InferenceRequest.MaxTokens` ≥ ~200 on tool-bearing requests so the call is
+  not truncated, and keep `AttemptTimeout` generous (no cold-load tier anymore,
+  but decode + preamble still take time).
+
+> **Historical note.** Earlier revisions of this doc described the ADR-006
+> three-tier wiring (`coding-fast`/`coding-balanced`/`coding-quality` all local)
+> and the ADR-008 two-host AMD topology. Both ADRs are superseded by
+> [ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md); see git history
+> for the retired wiring.
+
+## Tool-call schema-validate-and-retry guard
+
+A small local workhorse occasionally emits a malformed tool call (invalid JSON
+arguments) or — if `max_tokens` is too low — truncates before completing it. A
+single malformed call breaks an agent pipeline silently. Wrap tool-bearing
+completions in a validate-and-retry loop: parse the call, validate its arguments
+against the tool's JSON schema, and on failure re-issue once with a structured
+corrective message before falling through.
+
+**This guard wraps a single `IInferenceBackend` (the workhorse), not the
+`FallbackInferenceRouter`.** Implement it as a method on (or decorator around)
+`OmlxInferenceBackend`, so the corrective retry re-targets the same local model.
+Wrapped around the router instead, the first failure could already have failed
+over to the cloud backend, and the "retry" would never re-exercise the workhorse.
+The terminal `InferenceUnavailableException` is what hands the request to the
+router's next backend.
+
+```csharp
+// Sketch — assumes the backend surfaces tool_calls and you hold the tool's
+// argument schema. Validates the arguments JSON; retries once on failure.
+public async Task<InferenceResponse> CompleteWithToolGuardAsync(
+    InferenceRequest request, Func<string, bool> argumentsAreValid, CancellationToken ct = default)
+{
+    var messages = request.Messages.ToList();
+    for (int attempt = 0; attempt < 2; attempt++)
+    {
+        InferenceResponse resp = await CompleteAsync(request with { Messages = messages }, ct);
+
+        // Adapt extraction to your wire shape; a null/empty call or invalid-JSON
+        // arguments is the failure we retry on.
+        string? toolArgs = TryExtractToolArguments(resp);
+        if (toolArgs is not null && argumentsAreValid(toolArgs))
+            return resp;
+
+        if (attempt == 0)
+        {
+            // One corrective turn: name what was wrong, demand a single clean call.
+            messages.Add(new ChatMessage("assistant", resp.Content));
+            messages.Add(new ChatMessage("user",
+                "The previous tool call was missing or had invalid JSON arguments. " +
+                "Return exactly one well-formed tool call matching the schema, with no other text."));
+            continue;
+        }
+
+        // Both attempts failed — advance to the next backend rather than pass a
+        // malformed call downstream.
+        throw new InferenceUnavailableException("Workhorse returned no valid tool call after one retry.");
+    }
+    throw new InvalidOperationException("unreachable");
+}
+```
+
+Notes:
+
+- Keep the retry count at **one** — the failure is usually a truncation or a
+  formatting slip the corrective turn fixes; more retries waste a fan-out slot.
+- Validate against the **actual tool schema** (required fields, types), not merely
+  "is it JSON" — the common GLM failure is a complete-but-wrong-shape object.
+- Pair with generous `max_tokens` (above); truncation is the most common cause of a
+  missing call.
 
 ## Gotchas
 
@@ -264,5 +342,5 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
   pinned version.
 - Requires the `Microsoft.Extensions.Http.Resilience` NuGet package.
 
-_Source: synthesized from `dotnet-expert` against .NET 10 LTS guidance
-(`learn.microsoft.com` HTTP resilience + `IHttpClientFactory` docs)._
+*Source: synthesized from `dotnet-expert` against .NET 10 LTS guidance
+(`learn.microsoft.com` HTTP resilience + `IHttpClientFactory` docs).*
