@@ -1,6 +1,6 @@
 # ADR-009: Mac as a single-model subagent workhorse, with the cloud as the frontier
 
-- Status: accepted
+- Status: accepted (forward direction — not yet implemented; tracked in [#14](https://github.com/psmfd/local-llm/issues/14))
 - Date: 2026-06-29
 
 This ADR is **additive and supersedes nothing** (see "Relationship to prior ADRs"
@@ -53,8 +53,9 @@ single-stream quality?
 ## Decision Outcome
 
 Chosen option: **a single pinned, text-only, 3B-active MoE coder on oMLX**,
-because it gives the fan-out one shared prefix cache, 2–4× more KV headroom than
-the ADR-006 pair, and never exercises oMLX's buggy multi-model swap path — while
+because it gives the fan-out one shared prefix cache, ~2× more KV headroom than
+the ADR-006 pair (~60 GB vs ~29 GB under the 90 GB guard), and never exercises
+oMLX's buggy multi-model swap path — while
 keeping every tool-call path verified on oMLX.
 
 **Model (CONFIRMED 2026-06-29 — gate resolved):** **`mlx-community/GLM-4.7-Flash-8bit`**.
@@ -113,23 +114,6 @@ workhorse-reframe investigation (single-vs-dual, concurrency/bandwidth ceiling,
 subagent workload profile) was produced by the parallel-agent research behind
 this ADR.
 
-## Relationship to prior ADRs (additive — supersedes nothing)
-
-This ADR is recorded as a **forward direction**, not a supersession. ADR-006
-(three-tier lineup) and ADR-008 (cross-host AMD routing) are left **untouched and
-remain the record of the currently-implemented state** until the gates above pass
-and `setup-omlx-m5.sh` is reworked (#14). The intended end-state this ADR adopts:
-
-- the **Mac single-workhorse absorbs the local executor / `coding-fast` role**,
-- the **AMD appliance (ADR-008) is repurposed or deprecated**, and
-- the **cloud provider becomes the frontier / quality tier** in the
-  `FallbackInferenceRouter`.
-
-Formal supersession of ADR-006/008 is **deferred to the implementation PR (#14)**
-so the record does not assert a teardown ahead of the validated change. Until
-then, a reader should treat ADR-009 as the current *intent* and ADR-006/008 as
-the current *implementation*.
-
 ### Consequences
 
 - Good, because the fan-out gets one shared prefix cache and ~60 GB KV headroom
@@ -155,3 +139,20 @@ the current *implementation*.
   - Deferring formal supersession leaves ADR-006/008 co-existing with this record
     until #14 lands; the intent-vs-implementation split must be read carefully in
     the interim.
+
+## Relationship to prior ADRs (additive — supersedes nothing)
+
+This ADR is recorded as a **forward direction**, not a supersession. ADR-006
+(three-tier lineup) and ADR-008 (cross-host AMD routing) are left **untouched and
+remain the record of the currently-implemented state** until the gates above pass
+and `setup-omlx-m5.sh` is reworked (#14). The intended end-state this ADR adopts:
+
+- the **Mac single-workhorse absorbs the local executor / `coding-fast` role**,
+- the **AMD appliance (ADR-008) is repurposed or deprecated**, and
+- the **cloud provider becomes the frontier / quality tier** in the
+  `FallbackInferenceRouter`.
+
+Formal supersession of ADR-006/008 is **deferred to the implementation PR (#14)**
+so the record does not assert a teardown ahead of the validated change. Until
+then, a reader should treat ADR-009 as the current *intent* and ADR-006/008 as
+the current *implementation*.

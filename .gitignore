@@ -2,5 +2,9 @@
 .claude/settings.local.json
 .claude/settings.json
 
+# Ephemeral session-restart / handoff notes — never committed (leak local paths
+# and go stale immediately; durable decisions belong in adrs/ and docs/)
+.session-notes/
+
 # macOS
 .DS_Store
