@@ -57,7 +57,7 @@ so the script never writes it directly); it degrades to printed manual
 admin-panel steps if the API can't be reached (ADR-009).
 
 Preflight hard-fails with exit `2` for non-macOS, non-arm64, RAM below ~120 GB,
-free disk below ~60 GB, or missing Homebrew. M5 Max is the tuned target; a
+free disk below ~90 GB, or missing Homebrew. M5 Max is the tuned target; a
 non-M5 Apple Silicon chip warns instead of hard-failing so nearby Max-class hosts
 can still smoke-test deliberately.
 

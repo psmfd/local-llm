@@ -31,7 +31,7 @@ These came out of prior analysis. Treat the runtime and serving config as decide
 
 ## What to do
 
-1. **Verify environment** — macOS, arm64, RAM ≥ ~120 GB, free disk ≥ ~60 GB (workhorse ≈ 30 GB + staging/cache), Homebrew present. Abort with exit 2 on those hard precondition failures. Treat M5 Max as the tuned target; warn rather than hard-fail on non-M5 Apple Silicon so nearby Max-class hosts can smoke-test deliberately.
+1. **Verify environment** — macOS, arm64, RAM ≥ ~120 GB, free disk ≥ ~90 GB (workhorse ≈ 30 GB + up-to-24 GB hot-cache flush + staging), Homebrew present. Abort with exit 2 on those hard precondition failures. Treat M5 Max as the tuned target; warn rather than hard-fail on non-M5 Apple Silicon so nearby Max-class hosts can smoke-test deliberately.
 2. **Author or reuse the setup script.** If `setup-omlx-m5.sh` already exists in the working directory, review it against the spec above and the conventions, then use it. Otherwise write it. It must: install oMLX (no MCP extra); create `~/models`, `~/.omlx/cache`, `~/.omlx/logs`; generate the 0600 API key; set + persist the wired limit; write the start wrapper; install the on-demand LaunchAgent (RunAtLoad=false) and the `omlxctl` control tool, leaving the server stopped; leave model download opt-in (default off) routing to the `/admin` downloader unless repo IDs are verified.
 3. **Lint it.** Run `shellcheck` and fix all Error/Warning findings; report results in the structured review format with a verdict line.
 4. **Run it**, supplying sudo when prompted for the wired-limit step.

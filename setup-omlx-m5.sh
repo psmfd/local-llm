@@ -80,9 +80,11 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=60          # GLM-4.7-Flash-8bit (~30 GB) + hf staging/logs headroom (ADR-009).
-                        # Gates required FREE space only — retired ADR-006 tiers
-                        # already on disk are sunk cost, not part of this floor.
+MIN_DISK_GB=90          # GLM-4.7-Flash-8bit (~30 GB) + up-to-24 GB hot-cache flush
+                        # to ~/.omlx/cache on every stop + hf staging/logs headroom
+                        # (ADR-009). Gates required FREE space only — retired
+                        # ADR-006 tiers already on disk are sunk cost, not part
+                        # of this floor.
 
 # --- Model lineup (ADR-009: single Mac workhorse, cloud is the frontier) -----
 # ADR-006's three co-resident/on-demand tiers are retired: the cloud provider is
@@ -752,7 +754,8 @@ print_pin_instructions() {
 }
 
 # retired_model_state REPO — reads the LOCAL oMLX-owned model_settings.json
-# (never the server) and prints:
+# (never the server; schema — basename-keyed "models" map with model_alias /
+# is_pinned / dflash_ssd_cache fields — verified against oMLX 0.4.4) and prints:
 #   absent  oMLX has never registered this model — no PUT should be sent
 #           (retired tiers are never actively aliased/registered by us)
 #   dirty   present and still is_pinned or dflash_ssd_cache — needs an unpin PUT
@@ -854,7 +857,14 @@ apply_pins() {
         if [ -x "$CONTROL_PATH" ] && "$CONTROL_PATH" start >/dev/null 2>&1; then
             started_by_us=true
         else
-            record_warn "pin" "could not start the server to apply pins (omlxctl start failed)"
+            # omlxctl start returns non-zero both when kickstart fails AND when
+            # kickstart succeeded but readiness timed out — in the timeout case
+            # the server IS running and still loading the model. Best-effort
+            # stop either way (safe: the health probe above said nothing was
+            # running before we tried), so setup never leaves a half-started
+            # server resident (ADR-005 end-state invariant).
+            [ -x "$CONTROL_PATH" ] && "$CONTROL_PATH" stop >/dev/null 2>&1 || true
+            record_warn "pin" "server did not start or did not become ready in time — stopped any partial start; re-run setup to apply pins"
             print_pin_instructions; return
         fi
     fi
@@ -870,13 +880,27 @@ apply_pins() {
         print_pin_instructions; return
     fi
 
+    # oMLX persists its CLI args — including a copy of the API key — into
+    # settings.json, written 0644 on the first-ever start. ensure_dirs only
+    # tightens a pre-existing file, so close the gap here, right after the
+    # first start this run may have triggered.
+    [ -f "$OMLX_HOME/settings.json" ] && chmod 600 "$OMLX_HOME/settings.json" 2>/dev/null || true
+
     # Admin auth: oMLX >= 0.4.4 requires a session login (POST /admin/api/login
-    # with the API key -> session cookie); the bearer key alone gets a 401
+    # with the API key -> session cookie; the "api_key" body field name is
+    # verified against oMLX 0.4.4); the bearer key alone gets a 401
     # "Admin authentication required". Older builds accepted the bearer key
     # directly, so the probe below still sends both — the cookie jar is empty
     # (harmless) when the login endpoint does not exist.
+    # SECURITY NOTE: the key rides curl's argv (-H/-d) for these brief admin
+    # calls — visible to other local accounts via ps for each subprocess's
+    # lifetime. Same accepted gap as the wrapper's --api-key (ADR-001):
+    # loopback-only server on a single-user host.
+    # The session-cookie jar lives under the 0700 $OMLX_HOME (not shared /tmp),
+    # so even an abnormal exit that skips the rm below leaves the residue
+    # unreadable to other accounts.
     local cookie_jar
-    cookie_jar="$(mktemp)"
+    cookie_jar="$(mktemp "${OMLX_HOME}/.admin-cookie.XXXXXX")"
     if curl -fsS --max-time 5 -c "$cookie_jar" -H 'Content-Type: application/json' \
         -d "{\"api_key\":\"${key}\"}" "${base}/admin/api/login" >/dev/null 2>&1; then
         detail "admin session established via /admin/api/login"

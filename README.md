@@ -4,7 +4,7 @@ Stand up a **local, OpenAI/Anthropic-compatible LLM inference server** on an App
 
 ## TL;DR — start now
 
-You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~60 GB free disk (the workhorse model ≈ 30 GB plus staging/cache headroom), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
+You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~90 GB free disk (the workhorse model ≈ 30 GB, up to 24 GB of hot-cache flush to SSD, plus staging headroom), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
 
 ```bash
 git clone https://github.com/psmfd/local-llm.git && cd local-llm
@@ -23,7 +23,7 @@ The script is idempotent — re-running it skips whatever already exists. Run `.
 
 `setup-omlx-m5.sh` performs, in order:
 
-1. **Preflight** — hard-fails (exit `2`) on non-macOS, non-arm64, <~120 GB RAM, <~60 GB free disk, or missing Homebrew.
+1. **Preflight** — hard-fails (exit `2`) on non-macOS, non-arm64, <~120 GB RAM, <~90 GB free disk, or missing Homebrew.
 2. **Installs oMLX** via `brew tap jundot/omlx && brew install omlx` (no MCP — tool access stays explicit).
 3. **Creates directories** — `~/models`, `~/.omlx/{cache,logs,bin}` (`~/.omlx` is chmod 700).
 4. **Generates an API key** at `~/.omlx/api-key` (chmod 600, never printed).

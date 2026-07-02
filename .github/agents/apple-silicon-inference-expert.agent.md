@@ -39,8 +39,9 @@ questions, defer to `amd-inference-expert`.
   (98304 MB), leaving ~32 GB for macOS. The value is **not** persistent across reboot —
   a root LaunchDaemon applies it at boot (mechanics live in `omlx-expert`).
 - A single resident model maximizes KV/prefix-cache headroom; co-residency of two
-  large models roughly halves it. (This project deliberately co-resides two ~30 GB
-  tiers under the ceiling, leaving ~29 GB for KV.)
+  large models roughly halves it. (This project pins a single ~30 GB workhorse,
+  leaving ~60 GB for KV under the 90 GB guard — ADR-009; the earlier ADR-006
+  lineup co-resided two ~30 GB tiers at ~29 GB KV.)
 
 ### MLX frameworks & the serving path
 
