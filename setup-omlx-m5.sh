@@ -80,44 +80,51 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=90          # GLM-4.7-Flash-8bit (~30 GB) + up-to-24 GB hot-cache flush
-                        # to ~/.omlx/cache on every stop + hf staging/logs headroom
-                        # (ADR-009). Gates required FREE space only — retired
-                        # ADR-006 tiers already on disk are sunk cost, not part
+MIN_DISK_GB=90          # GLM-4.7-Flash-6bit (~24 GB) + SSD prefix-cache tier
+                        # capped at 50 GB + hf staging/logs headroom (ADR-010).
+                        # Gates required FREE space only — retired tiers and the
+                        # 8-bit fallback already on disk are sunk cost, not part
                         # of this floor.
 
-# --- Model lineup (ADR-009: single Mac workhorse, cloud is the frontier) -----
+# --- Model lineup (ADR-009 lineup, ADR-010 quant: single Mac workhorse) ------
 # ADR-006's three co-resident/on-demand tiers are retired: the cloud provider is
 # now the quality frontier and the Mac's only job is to serve a homogeneous
 # subagent fan-out from ONE pinned model, maximizing shared prefix-cache reuse
-# and KV headroom (~60 GB vs ADR-006's ~29 GB under the 90 GB guard). The model
-# is a verified TEXT-ONLY MLX coder build (no vision_config → batched LLM engine,
-# no engine override) and tool-call-verified on oMLX. Repo ID verified against
-# HuggingFace config.json 2026-06-29 (ADR-009); re-probed before download.
-# See adrs/009-mac-single-workhorse-cloud-frontier.md (decision) and
-# docs/runtime-tiering-research.md (model-selection research).
+# and KV headroom under the 90 GB guard. The model is a verified TEXT-ONLY MLX
+# coder build (no vision_config → batched LLM engine, no engine override) and
+# tool-call-verified on oMLX. ADR-010 moved the quant 8-bit → 6-bit after an
+# on-host A/B measured quality parity (tool-calls 58/58 each; HumanEval 81.7%
+# vs 80.5%, statistical tie) and a doubled sustained-load margin. Repo ID
+# verified against HuggingFace config.json 2026-07-04 (ADR-010); re-probed
+# before download. See adrs/010-6bit-workhorse-sustained-mark.md (decision),
+# adrs/009-mac-single-workhorse-cloud-frontier.md (lineup), and
+# docs/workhorse-probes.md (probe 3 — the sustained-load measurements).
 #
 # TIER_MODELS holds exactly one entry, "repo|alias|pinned(true|false)", so every
 # existing loop (download, pi-config, pin/alias, validate) works unchanged over a
 # 1-element, Bash-3.2-safe indexed array (macOS default shell).
 TIER_MODELS=(
-    "mlx-community/GLM-4.7-Flash-8bit|coding-workhorse|true"
+    "mlx-community/GLM-4.7-Flash-6bit|coding-workhorse|true"
 )
 # The workhorse's alias drives the detailed validation probes below
 # (chat/tool/concurrency).
 PRIMARY_ALIAS="coding-workhorse"
 
-# RETIRED_MODELS: ADR-006 tiers this script no longer downloads, aliases, or
-# validates. Entries stay on disk (never deleted); Qwen3-Coder-30B remains the
-# documented INACTIVE fallback should GLM ever regress (ADR-009). apply_pins
-# actively clears is_pinned/dflash on these — only when they already exist in
-# oMLX's model_settings.json — so an upgraded ADR-006 host actually frees the
-# memory it was holding for them. Format: "repo|old_alias" (2 fields — no pin
-# field; the action is always force-unpin). The old alias is echoed back
-# unchanged in the unpin PUT body rather than cleared, because the admin PUT's
-# replace-vs-merge semantics for omitted fields are unverified; a stale alias on
-# an unpinned model is inert (no configured client requests it).
+# RETIRED_MODELS: models this script no longer downloads, aliases, or validates
+# — the ADR-006 tiers plus the ADR-010-retired 8-bit workhorse. Entries stay on
+# disk (never deleted); the 8-bit is the PRIMARY inactive fallback (same model,
+# quality-parity-tested rollback) and Qwen3-Coder-30B the secondary
+# (different-family) fallback. apply_pins clears is_pinned/dflash on these —
+# only when they already exist in oMLX's model_settings.json — so an upgraded
+# host actually frees the memory. Format: "repo|alias_to_set" (2 fields — no pin
+# field; the action is always force-unpin). The alias field is what the unpin
+# PUT SETS: for the ADR-006 tiers it echoes their old alias unchanged (the admin
+# PUT's replace-vs-merge semantics for omitted fields are unverified; a stale
+# alias on an unpinned model is inert), but for the 8-bit it RENAMES the model
+# off 'coding-workhorse' so the primary alias transfers cleanly to the 6-bit —
+# which is why the unpin pass runs BEFORE the workhorse pin in apply_pins.
 RETIRED_MODELS=(
+    "mlx-community/GLM-4.7-Flash-8bit|workhorse-8b"
     "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast"
     "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality"
 )
@@ -743,14 +750,15 @@ print_pin_instructions() {
     for entry in "${TIER_MODELS[@]}"; do
         echo "         - $(basename "$(tier_repo "$entry")")  alias '$(tier_alias "$entry")'  PIN (sole resident model)"
     done
-    echo "      3. If upgrading from the ADR-006 three-tier install, also UNPIN the retired tiers"
-    echo "         (leave them on disk — Qwen3-Coder-30B is the documented inactive fallback):"
+    echo "      3. If upgrading from a prior install, also UNPIN the retired models BEFORE"
+    echo "         pinning the workhorse (they stay on disk — the 8-bit is the primary inactive"
+    echo "         fallback, Qwen3-Coder-30B the secondary; ADR-010):"
     local r
     for r in "${RETIRED_MODELS[@]}"; do
-        echo "         - $(basename "$(tier_repo "$r")")  UNPIN (clear is_pinned; DFlash off)"
+        echo "         - $(basename "$(tier_repo "$r")")  UNPIN (clear is_pinned; DFlash off; set alias '$(tier_alias "$r")')"
     done
     echo "      Aliases/pins persist in ${OMLX_HOME}/model_settings.json and appear in GET /v1/models."
-    echo "      No engine override is needed — the workhorse is a text-only coder build (ADR-009)."
+    echo "      No engine override is needed — the workhorse is a text-only coder build (ADR-009/010)."
 }
 
 # retired_model_state REPO — reads the LOCAL oMLX-owned model_settings.json
@@ -758,13 +766,15 @@ print_pin_instructions() {
 # is_pinned / dflash_ssd_cache fields — verified against oMLX 0.4.4) and prints:
 #   absent  oMLX has never registered this model — no PUT should be sent
 #           (retired tiers are never actively aliased/registered by us)
-#   dirty   present and still is_pinned or dflash_ssd_cache — needs an unpin PUT
-#   clean   present and already unpinned/dflash-off — nothing to do
+#   dirty   present and still is_pinned or dflash_ssd_cache — OR still holding
+#           the primary alias (an unpinned 8-bit squatting on 'coding-workhorse'
+#           would collide with the 6-bit's alias PUT; ADR-010) — needs a PUT
+#   clean   present, unpinned/dflash-off, not on the primary alias — nothing to do
 # Shared by pins_converged (gate) and apply_pins (action) — one source of truth.
 retired_model_state() {
     local repo="$1"
     [ -f "$OMLX_HOME/model_settings.json" ] || { printf 'absent'; return; }
-    python3 - "$OMLX_HOME/model_settings.json" "$(basename "$repo")" <<'PYEOF' 2>/dev/null || printf 'absent'
+    python3 - "$OMLX_HOME/model_settings.json" "$(basename "$repo")" "$PRIMARY_ALIAS" <<'PYEOF' 2>/dev/null || printf 'absent'
 import json, sys
 try:
     models = json.load(open(sys.argv[1])).get("models", {})
@@ -773,7 +783,8 @@ except Exception:
 m = models.get(sys.argv[2])
 if not m:
     print("absent")
-elif bool(m.get("is_pinned")) or bool(m.get("dflash_ssd_cache")):
+elif (bool(m.get("is_pinned")) or bool(m.get("dflash_ssd_cache"))
+      or m.get("model_alias") == sys.argv[3]):
     print("dirty")
 else:
     print("clean")
@@ -919,7 +930,33 @@ apply_pins() {
     fi
     detail "admin API mounted at ${admin}"
 
-    local mid alias pin body
+    # Retired models FIRST: force-unpin (and, for the ADR-010-retired 8-bit,
+    # rename off the primary alias) whatever a prior install left registered, so
+    # the memory is actually freed AND 'coding-workhorse' is vacant before the
+    # workhorse PUT below claims it (see RETIRED_MODELS comment). Only entries
+    # already registered in model_settings.json are touched; ttl_seconds bounds
+    # any accidental load of the now-unpinned model.
+    local r rmid rstate ralias body
+    for r in "${RETIRED_MODELS[@]}"; do
+        rmid="$(basename "$(tier_repo "$r")")"
+        ralias="$(tier_alias "$r")"
+        rstate="$(retired_model_state "$(tier_repo "$r")")"
+        case "$rstate" in
+            absent) skip "unpin-${rmid}" "not in model_settings.json — never registered, nothing to unpin" ;;
+            clean)  skip "unpin-${rmid}" "already unpinned (DFlash off, primary alias clear)" ;;
+            dirty)
+                body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+                if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
+                    -d "$body" "${base}${admin}/models/${rmid}/settings" >/dev/null 2>&1; then
+                    ok "unpin-${rmid}" "retired model unpinned as '${ralias}' (stays on disk; memory freed on next start)"
+                else
+                    record_warn "unpin-${rmid}" "admin PUT failed — unpin ${rmid} manually at ${base}/admin"
+                fi
+                ;;
+        esac
+    done
+
+    local mid alias pin
     for entry in "${TIER_MODELS[@]}"; do
         mid="$(basename "$(tier_repo "$entry")")"
         alias="$(tier_alias "$entry")"
@@ -945,31 +982,6 @@ apply_pins() {
     if ! $workhorse_present; then
         record_warn "pin" "workhorse model not on disk — download it with --download-model, then re-run to pin it (any retired-tier memory was still freed this run)"
     fi
-
-    # Retired ADR-006 tiers: force-unpin whatever a prior install left pinned so
-    # the upgraded host actually frees the memory (ADR-009). Only entries already
-    # registered in model_settings.json are touched; the old alias is echoed back
-    # unchanged (see RETIRED_MODELS comment) and ttl_seconds bounds any
-    # accidental load of the now-unpinned model.
-    local r rmid rstate ralias
-    for r in "${RETIRED_MODELS[@]}"; do
-        rmid="$(basename "$(tier_repo "$r")")"
-        ralias="$(tier_alias "$r")"
-        rstate="$(retired_model_state "$(tier_repo "$r")")"
-        case "$rstate" in
-            absent) skip "unpin-${rmid}" "not in model_settings.json — never registered, nothing to unpin" ;;
-            clean)  skip "unpin-${rmid}" "already unpinned (DFlash off)" ;;
-            dirty)
-                body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
-                if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
-                    -d "$body" "${base}${admin}/models/${rmid}/settings" >/dev/null 2>&1; then
-                    ok "unpin-${rmid}" "retired tier unpinned (stays on disk; memory freed on next start)"
-                else
-                    record_warn "unpin-${rmid}" "admin PUT failed — unpin ${rmid} manually at ${base}/admin"
-                fi
-                ;;
-        esac
-    done
     rm -f "$cookie_jar"
 
     if $started_by_us; then

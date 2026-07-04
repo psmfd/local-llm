@@ -4,11 +4,11 @@ Stand up a **local, OpenAI/Anthropic-compatible LLM inference server** on an App
 
 ## TL;DR — start now
 
-You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~90 GB free disk (the workhorse model ≈ 30 GB, an SSD prefix-cache tier capped at 50 GB, plus ~10 GB staging slack), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
+You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~90 GB free disk (the workhorse model ≈ 24 GB, an SSD prefix-cache tier capped at 50 GB, plus staging slack), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
 
 ```bash
 git clone https://github.com/psmfd/local-llm.git && cd local-llm
-./setup-omlx-m5.sh --download-model   # install + configure + fetch the workhorse (~30 GB)
+./setup-omlx-m5.sh --download-model   # install + configure + fetch the workhorse (~24 GB)
 omlxctl start                         # start the server on demand (NOT at login)
 ./setup-omlx-m5.sh --validate         # smoke-test the running server
 ```
@@ -38,13 +38,13 @@ One pinned model ([ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md)) �
 
 | Alias | Model | ~Size | Residency |
 |---|---|---|---|
-| `coding-workhorse` | `mlx-community/GLM-4.7-Flash-8bit` (MoE, ~3 B active, 202 K ctx, MLA KV compression) | ~30 GB | pinned, sole resident |
+| `coding-workhorse` | `mlx-community/GLM-4.7-Flash-6bit` (MoE, ~3 B active, 202 K ctx, MLA KV compression) | ~24 GB | pinned, sole resident |
 
-A single pinned model gives the parallel-agent fan-out **one shared prefix cache and ~60 GB of KV headroom** under the 90 GB memory guard (vs ~29 GB with ADR-006's co-resident pair), and never exercises oMLX's multi-model swap path. `--max-concurrent-requests` is 10 — safe concurrency is prefill-activation-bound and falls with context length (measured 10 clean at ~16 K ctx); excess requests queue at admission. `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` may remain on disk from an earlier install as the documented **inactive fallback** — it is never downloaded, pinned, or served by default. The setup script applies the alias + pin via the oMLX admin API (briefly starting the server, then stopping it; falls back to printed manual steps) and **unpins retired ADR-006 tiers** it finds. Re-verify the HuggingFace repo ID against current availability before downloading — the script probes it, but better checkpoints ship often.
+A single pinned model gives the parallel-agent fan-out **one shared prefix cache** and never exercises oMLX's multi-model swap path. The 6-bit quant was adopted after an on-host A/B measured quality parity with the 8-bit (tool-calls 58/58 each; HumanEval 81.7% vs 80.5%, statistical tie) while freeing ~7 GB of weights ([ADR-010](adrs/010-6bit-workhorse-sustained-mark.md)). `--max-concurrent-requests` is 8 — the **sustained** safe concurrency: the earlier burst figure of 10 collapses under back-to-back fan-out (memory-enforcer pressure spiral, HTTP-400 storms; see [docs/workhorse-probes.md](docs/workhorse-probes.md) probe 3); at 8, sustained ~16 K-context load runs clean and excess requests queue at admission. `GLM-4.7-Flash-8bit` stays on disk as the **primary inactive fallback** (rollback = pin swap + restart), with `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` as the secondary — neither is pinned or served by default. The setup script applies the alias + pin via the oMLX admin API (briefly starting the server, then stopping it; falls back to printed manual steps) and **unpins retired ADR-006 tiers** it finds. Re-verify the HuggingFace repo ID against current availability before downloading — the script probes it, but better checkpoints ship often.
 
 ## Starting and stopping
 
-Startup is intentional — nothing wires the ~30 GB model until you ask. Control the server with `omlxctl` (installed to `~/.omlx/bin/omlxctl`, symlinked onto `PATH` when possible; otherwise call it by full path or add `~/.omlx/bin` to `PATH`):
+Startup is intentional — nothing wires the ~24 GB model until you ask. Control the server with `omlxctl` (installed to `~/.omlx/bin/omlxctl`, symlinked onto `PATH` when possible; otherwise call it by full path or add `~/.omlx/bin` to `PATH`):
 
 ```bash
 omlxctl start     # kickstart the server, then wait for /health (cold start ~90 s)
@@ -76,7 +76,7 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 | [`setup-omlx-m5.sh`](setup-omlx-m5.sh) | The provisioning script (idempotent; exit codes `0` pass / `1` error / `2` precondition) |
 | [`templates/`](templates/) | Start wrapper, LaunchAgent/LaunchDaemon plists, `omlxctl` control tool, Pi provider block — installed with placeholder substitution |
 | [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md) | The authoritative implementation brief |
-| [`adrs/`](adrs/) | Decision records — the current lineup is [ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md) (single-model workhorse, cloud as frontier; supersedes [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) three-tier lineup and [ADR-008](adrs/008-cross-host-routing-integration.md) cross-host AMD routing), plus [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart — still in force) |
+| [`adrs/`](adrs/) | Decision records — the current config is [ADR-010](adrs/010-6bit-workhorse-sustained-mark.md) (6-bit quant + sustained mark of 8) amending [ADR-009](adrs/009-mac-single-workhorse-cloud-frontier.md) (single-model workhorse, cloud as frontier; supersedes [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) three-tier lineup and [ADR-008](adrs/008-cross-host-routing-integration.md) cross-host AMD routing), plus [ADR-005](adrs/005-on-demand-service-lifecycle.md) (on-demand lifecycle, no login autostart — still in force) |
 | `.claude/agents/`, `.github/agents/` | Repository-resident `omlx-expert` domain agent (read-only/advisory) for Claude Code and GitHub Copilot |
 | [`.github/workflows/`](.github/workflows/) | CI lint gate — `validate` (shellcheck + markdownlint + plist well-formedness) and `lint-pr-title` (Conventional Commits), required checks on the branch rulesets ([ADR-007](adrs/007-ci-rulesets-and-release-strategy.md)) |
 | [`docs/router-wiring.md`](docs/router-wiring.md) | Wiring the server into a .NET `IInferenceBackend` / `FallbackInferenceRouter` |
@@ -93,7 +93,7 @@ git pull
 ./setup-omlx-m5.sh --validate # confirms coding-workhorse resolves and retired tiers are unpinned
 ```
 
-The re-run re-renders the start wrapper with the new serving flags (`--hot-cache-max-size 24GB`, `--max-concurrent-requests 10`, `--paged-ssd-cache-max-size 50GB`), renames GLM's alias from `coding-balanced` to `coding-workhorse`, and **actively unpins the retired tiers** (Qwen3-Coder-30B, Qwen3-Coder-Next) via the admin API so their ~30–45 GB is actually freed — the models stay on disk (Qwen3-Coder-30B is the documented inactive fallback; delete Qwen3-Coder-Next by hand if you want the disk back). If the server is running when you re-run, the wrapper update stops it (restart with `omlxctl start`). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json` — note the provider now exposes only `coding-workhorse`). Running it twice is a no-op.
+The re-run re-renders the start wrapper with the current serving flags (`--hot-cache-max-size 24GB`, `--max-concurrent-requests 8`, `--paged-ssd-cache-max-size 50GB`), downloads the 6-bit workhorse if absent (`--download-model`), and **actively unpins the retired models** via the admin API so their memory is actually freed — first renaming `GLM-4.7-Flash-8bit` to alias `workhorse-8b` so `coding-workhorse` transfers cleanly to the 6-bit, and clearing any still-pinned ADR-006 tiers (Qwen3-Coder-30B, Qwen3-Coder-Next). Retired models stay on disk (the 8-bit is the primary inactive fallback, Qwen3-Coder-30B the secondary; delete Qwen3-Coder-Next by hand if you want the disk back). If the server is running when you re-run, the wrapper update stops it (restart with `omlxctl start`). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json` — note the provider now exposes only `coding-workhorse`). Running it twice is a no-op.
 
 ## Teardown
 
@@ -108,9 +108,10 @@ sudo launchctl bootout system/com.local.iogpu-wired-limit 2>/dev/null || true
 sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 brew uninstall omlx && brew untap jundot/omlx
 rm -rf ~/.omlx \
-  ~/models/GLM-4.7-Flash-8bit                       # the workhorse
-# Also remove whichever retired ADR-006 tiers are still on disk:
-rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
+  ~/models/GLM-4.7-Flash-6bit                       # the workhorse
+# Also remove whichever fallback/retired models are still on disk:
+rm -rf ~/models/GLM-4.7-Flash-8bit \
+  ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
   ~/models/Qwen3-Coder-Next-MLX-4bit
 ```
 
