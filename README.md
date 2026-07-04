@@ -4,7 +4,7 @@ Stand up a **local, OpenAI/Anthropic-compatible LLM inference server** on an App
 
 ## TL;DR — start now
 
-You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~90 GB free disk (the workhorse model ≈ 30 GB, up to 24 GB of hot-cache flush to SSD, plus staging headroom), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
+You need: an Apple Silicon Mac with **128 GB unified memory** (tuned for M5 Max; other Max-class chips warn but work), ~90 GB free disk (the workhorse model ≈ 30 GB, an SSD prefix-cache tier capped at 50 GB, plus ~10 GB staging slack), macOS, and [Homebrew](https://brew.sh). One step needs `sudo` (GPU wired-memory limit).
 
 ```bash
 git clone https://github.com/psmfd/local-llm.git && cd local-llm
@@ -93,7 +93,7 @@ git pull
 ./setup-omlx-m5.sh --validate # confirms coding-workhorse resolves and retired tiers are unpinned
 ```
 
-The re-run re-renders the start wrapper with the new serving flags (`--hot-cache-max-size 24GB`, `--max-concurrent-requests 10`), renames GLM's alias from `coding-balanced` to `coding-workhorse`, and **actively unpins the retired tiers** (Qwen3-Coder-30B, Qwen3-Coder-Next) via the admin API so their ~30–45 GB is actually freed — the models stay on disk (Qwen3-Coder-30B is the documented inactive fallback; delete Qwen3-Coder-Next by hand if you want the disk back). If the server is running when you re-run, the wrapper update stops it (restart with `omlxctl start`). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json` — note the provider now exposes only `coding-workhorse`). Running it twice is a no-op.
+The re-run re-renders the start wrapper with the new serving flags (`--hot-cache-max-size 24GB`, `--max-concurrent-requests 10`, `--paged-ssd-cache-max-size 50GB`), renames GLM's alias from `coding-balanced` to `coding-workhorse`, and **actively unpins the retired tiers** (Qwen3-Coder-30B, Qwen3-Coder-Next) via the admin API so their ~30–45 GB is actually freed — the models stay on disk (Qwen3-Coder-30B is the documented inactive fallback; delete Qwen3-Coder-Next by hand if you want the disk back). If the server is running when you re-run, the wrapper update stops it (restart with `omlxctl start`). It never overwrites your API key, the oMLX-managed `model_settings.json` (it merges via the admin API), or a non-empty Pi config (a merge snippet is left at `~/.omlx/pi-provider-snippet.json` — note the provider now exposes only `coding-workhorse`). Running it twice is a no-op.
 
 ## Teardown
 

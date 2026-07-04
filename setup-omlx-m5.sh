@@ -409,7 +409,7 @@ check_omlx_cli() {
         record_err "omlx-cli" "failed to inspect '$omlx_bin serve --help' — verify the oMLX CLI before starting the LaunchAgent"
         return 1
     fi
-    for flag in --host --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --hot-cache-max-size --max-concurrent-requests --api-key; do
+    for flag in --host --model-dir --port --memory-guard-gb --paged-ssd-cache-dir --paged-ssd-cache-max-size --hot-cache-max-size --max-concurrent-requests --api-key; do
         if ! printf '%s\n' "$help_text" | grep -q -- "$flag"; then
             record_err "omlx-cli" "'omlx serve --help' does not advertise expected flag: $flag"
             missing=true
@@ -925,7 +925,11 @@ apply_pins() {
         alias="$(tier_alias "$entry")"
         pin="$(tier_pin "$entry")"
         if [ ! -d "$(tier_dir "$entry")" ]; then skip "pin-${alias}" "model ${mid} not on disk — skipping"; continue; fi
-        # The workhorse: sole resident model, pinned, DFlash off (oMLX #702/#1892).
+        # The workhorse: sole resident model, pinned. dflash_ssd_cache=false covers
+        # only the DFlash speculative-decoding engine's private cache (DFlash is
+        # never engaged by this deployment); the main SSD prefix cache
+        # (--paged-ssd-cache-dir) stays ON — its live upstream risk is oMLX #702
+        # (the memory guard tracks Metal allocations, not cache RSS).
         if [ "$pin" = "true" ]; then
             body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"dflash_ssd_cache\":false}"
         else

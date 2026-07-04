@@ -74,3 +74,12 @@ Setup installs and registers the agent but deliberately leaves the server stoppe
   single-user, intentional-control workstation service.
 - Bad (accepted), because the server must be started manually after a reboot or
   login. The closing setup message and README document the `omlxctl start` step.
+
+## Addendum (2026-07-04)
+
+Upstream oMLX issue #15 — the GPU-hang crash loop cited in the context and
+consequences above — has since been closed via oMLX PR #16. The decision stands
+unchanged: `RunAtLoad=false` + `KeepAlive=false` remains justified by intentional
+startup and zero idle footprint, and a crash still surfaces plainly rather than
+respawning. The crash-loop hazard is simply no longer a live upstream bug and
+should not be cited as the load-bearing rationale.

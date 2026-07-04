@@ -92,7 +92,11 @@ best-current-model review.
   routes to the batched LLM engine with **no engine override**. One pinned model
   gives the fan-out one shared prefix cache and ~60 GB KV headroom under the
   90 GB guard (vs ~29 GB with ADR-006's pair) and never exercises oMLX's
-  multi-model swap path. DFlash SSD cache stays disabled (oMLX #702/#1892).
+  multi-model swap path. The DFlash speculative-decoding engine's private SSD
+  cache stays disabled (`dflash_ssd_cache=false`; DFlash itself is never engaged) —
+  the **main** SSD prefix cache (`--paged-ssd-cache-dir`) stays on; its live
+  upstream risk is oMLX #702 (the memory guard tracks Metal allocations, not
+  cache RSS).
   **Retired ADR-006 tiers** (`Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`,
   `Qwen3-Coder-Next-MLX-4bit`) are never downloaded/aliased/validated; setup
   actively unpins them if a prior install left them pinned. Qwen3-Coder-30B stays
@@ -100,7 +104,10 @@ best-current-model review.
   tool-bearing requests need `max_tokens ≥ ~200` (validation uses 256).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
-  `--paged-ssd-cache-dir ~/.omlx/cache`, `--hot-cache-max-size 24GB` (oMLX accepts
+  `--paged-ssd-cache-dir ~/.omlx/cache`, `--paged-ssd-cache-max-size 50GB` (oMLX
+  defaults the SSD tier to 100 GB — past the preflight's 90 GB free-disk budget;
+  50 GB keeps model + cache inside it with ~10 GB slack),
+  `--hot-cache-max-size 24GB` (oMLX accepts
   both absolute sizes and percentages; we pin an absolute value ≈ 27% of the guard
   for a deterministic footprint — one model, no second cache to fund),
   `--max-concurrent-requests 10` (ADR-009 "The Mark": prefill-activation-bound,
@@ -111,8 +118,9 @@ best-current-model review.
 - **On-demand lifecycle (no login autostart):** per-user LaunchAgent running a start
   wrapper that carries the tuned flags (`brew services` only starts with zero-config
   defaults). The agent is `RunAtLoad=false` + `KeepAlive=false`, so login registers
-  the job but never starts it, and a stop/crash stays down (no respawn — avoids the
-  oMLX issue #15 GPU-hang crash loop). Start/stop is intentional via `omlxctl`
+  the job but never starts it, and a stop/crash stays down (no respawn; zero idle
+  footprint — the oMLX #15 GPU-hang crash loop that originally motivated this is
+  fixed upstream via PR #16; see the ADR-005 addendum). Start/stop is intentional via `omlxctl`
   (`kickstart` / `kill SIGTERM`→`SIGKILL` after 30s / `kickstart -k`); setup leaves
   the server stopped (ADR-005).
 
