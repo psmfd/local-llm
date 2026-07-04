@@ -30,6 +30,8 @@ over single-stream tok/s). You return advice and exact commands; you never modif
 - `omlx serve` flags: `--host` (pin `127.0.0.1`), `--port` (default `8000`),
   `--model-dir`, `--memory-guard-gb` (replaced the removed `--max-process-memory`;
   caps Metal allocations, not total RSS), `--paged-ssd-cache-dir`,
+  `--paged-ssd-cache-max-size` (**defaults to 100GB** — pin it explicitly to fit
+  the host's disk budget; this project sets 50GB),
   `--hot-cache-max-size` (**accepts both absolute sizes like `24GB` and percentages
   like `20%`**), `--max-concurrent-requests` (**default 8**; this project sets 10 —
   ADR-009 "The Mark"), `--api-key`.

@@ -64,6 +64,9 @@ fi
 # ('20%'). We pin an absolute 24GB for a deterministic hot-cache footprint
 # independent of how oMLX resolves a percentage (≈ 27% of the 90 GB guard — up
 # from ADR-006's 18GB: one model, no second cache to fund; ADR-009).
+# --paged-ssd-cache-max-size caps the SSD tier of the prefix cache; left unset,
+# oMLX defaults it to 100GB — past the setup preflight's 90 GB free-disk budget.
+# 50GB keeps model (~30 GB) + SSD cache inside that budget with ~10 GB slack.
 # --max-concurrent-requests 10 is ADR-009's "Mark": safe concurrency is
 # prefill-activation-bound and context-dependent (measured 10 clean @ ~16K ctx);
 # excess requests queue at admission rather than aborting mid-flight.
@@ -75,6 +78,7 @@ exec "__BREW_PREFIX__/bin/omlx" serve \
     --port 8000 \
     --memory-guard-gb 90 \
     --paged-ssd-cache-dir "__CACHE_DIR__" \
+    --paged-ssd-cache-max-size 50GB \
     --hot-cache-max-size 24GB \
     --max-concurrent-requests 10 \
     --api-key "$api_key"
