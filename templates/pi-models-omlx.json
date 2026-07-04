@@ -14,7 +14,7 @@
 //
 // Single workhorse model (ADR-009), addressed by its oMLX ALIAS (verified to
 // resolve on the installed version):
-//   coding-workhorse  GLM-4.7-Flash-8bit  pinned, sole resident model
+//   coding-workhorse  GLM-4.7-Flash-6bit  pinned, sole resident model (ADR-010)
 // High-fidelity work routes to the cloud frontier, not this provider.
 //
 // contextWindow is held to 131072 (inside GLM's 202K native context): safe

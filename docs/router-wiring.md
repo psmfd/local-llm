@@ -11,8 +11,9 @@ and the quality role to a **cloud frontier** backend.
 - **Auth:** bearer key read once at startup from `OMLX_API_KEY`, else from the
   0600 file `~/.omlx/api-key`. **Never hardcode the key.**
 - **Aliases:** the `model` field carries the oMLX alias. This host serves one
-  pinned model ([ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md)):
-  `coding-workhorse` (GLM-4.7-Flash-8bit, sole resident). The high-fidelity
+  pinned model ([ADR-009](../adrs/009-mac-single-workhorse-cloud-frontier.md),
+  quant per [ADR-010](../adrs/010-6bit-workhorse-sustained-mark.md)):
+  `coding-workhorse` (GLM-4.7-Flash-6bit, sole resident). The high-fidelity
   quality role is **not served locally** — it routes to the cloud frontier.
   The alias/pin is applied by `setup-omlx-m5.sh` via the admin API.
 - **Concurrency:** typed `HttpClient` via `IHttpClientFactory` +
@@ -244,11 +245,18 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 - **Role routing.** `Fast` / `Balanced` → **Mac oMLX workhorse** primary → cloud
   fallback. `Quality` → oMLX throws `InferenceUnavailableException` (no local
   quality tier — the alias dictionary omits the role) → **cloud frontier**.
-- **Saturation.** oMLX runs at `--max-concurrent-requests 10` (**"The Mark"**,
-  validated on-host; the safe ceiling falls as shared-prefix context grows —
-  clean to N≥15 @ ~9K ctx but 10 @ ~16K, so keep subagent prefixes modest).
-  A 429 or a memory-guard 500 trips the circuit breaker, diverting traffic to
-  the cloud frontier until the local server recovers.
+- **Saturation.** oMLX runs at `--max-concurrent-requests 8` (**the sustained
+  Mark**, [ADR-010](../adrs/010-6bit-workhorse-sustained-mark.md): the earlier
+  burst figure of 10 collapses under back-to-back fan-out — measured 2026-07-04,
+  `docs/workhorse-probes.md` probe 3; at 8, sustained ~16K-context load runs
+  clean and excess requests queue at admission).
+  **Saturation surfaces as HTTP `400`, not 429/503**: when the memory guard's
+  preflight rejects, the body carries
+  `"oMLX prefill memory guard rejected this prompt"`. The router MUST treat that
+  specific 400 as a **capacity signal** — retry with backoff or trip the circuit
+  breaker and divert to the cloud frontier — never as a permanent client error
+  (a generic 400 without that marker remains a real client error). A 429 or a
+  memory-guard 500 still trips the breaker as before.
 - **max_tokens.** GLM-4.7-Flash emits a **reasoning preamble before tool calls**;
   set `InferenceRequest.MaxTokens` ≥ ~200 on tool-bearing requests so the call is
   not truncated, and keep `AttemptTimeout` generous (no cold-load tier anymore,

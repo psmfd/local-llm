@@ -13,9 +13,12 @@ prefix-cache reuse matter more than single-stream tok/s**.
 
 The authoritative brief is [`macos/local-llm-mac-os-creation.md`](macos/local-llm-mac-os-creation.md);
 the current model-lineup decision is [`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md)
-(the Mac is a **single-model subagent workhorse** — one pinned 3B-active MoE,
-GLM-4.7-Flash-8bit as `coding-workhorse` — with a **cloud provider as the
-quality frontier**; implemented via [#14](https://github.com/psmfd/local-llm/issues/14)).
+(the Mac is a **single-model subagent workhorse** — one pinned 3B-active MoE —
+with a **cloud provider as the quality frontier**; implemented via
+[#14](https://github.com/psmfd/local-llm/issues/14)), as amended by
+[`adrs/010-6bit-workhorse-sustained-mark.md`](adrs/010-6bit-workhorse-sustained-mark.md)
+(quant 8-bit → **6-bit** and concurrency mark 10 → **8**, from the sustained-load
+and A/B measurements in [#22](https://github.com/psmfd/local-llm/issues/22)/[#23](https://github.com/psmfd/local-llm/issues/23)).
 ADR-009 supersedes [`adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md`](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md)
 (the three-tier lineup) and [`adrs/008-cross-host-routing-integration.md`](adrs/008-cross-host-routing-integration.md)
 (cross-host AMD routing; the appliance is repurposed/deprecated). ADR-002's
@@ -34,7 +37,7 @@ The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user)
 
 ```bash
 ./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service + omlxctl (no model download; server NOT started)
-./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~30 GB) via hf
+./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~24 GB) via hf
 ./setup-omlx-m5.sh --configure-pi   # register the oMLX provider with the Pi coding agent (~/.pi/agent/models.json)
 ./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency) against a running server
 ./setup-omlx-m5.sh --verbose --help
@@ -84,23 +87,29 @@ best-current-model review.
 
 - **Runtime:** oMLX via Homebrew —
   `brew tap jundot/omlx https://github.com/jundot/omlx && brew install omlx`
-- **Model (single workhorse, text-only; ADR-009):** **`coding-workhorse`** —
-  `mlx-community/GLM-4.7-Flash-8bit` (`Glm4MoeLiteForCausalLM`, MoE ~3B active,
-  202K ctx, MLA KV compression — verified on-host ≈ GQA footprint). ~30 GB.
-  **Pinned, sole resident model.** A verified text-only coder build
-  (`*ForCausalLM`, no `vision_config`) and tool-call-verified on oMLX, so it
-  routes to the batched LLM engine with **no engine override**. One pinned model
-  gives the fan-out one shared prefix cache and ~60 GB KV headroom under the
-  90 GB guard (vs ~29 GB with ADR-006's pair) and never exercises oMLX's
-  multi-model swap path. The DFlash speculative-decoding engine's private SSD
+- **Model (single workhorse, text-only; ADR-009 lineup, ADR-010 quant):**
+  **`coding-workhorse`** — `mlx-community/GLM-4.7-Flash-6bit`
+  (`Glm4MoeLiteForCausalLM`, MoE ~3B active, 202K ctx, MLA KV compression —
+  verified on-host ≈ GQA footprint). ~24 GB (23.0 GB resident). Quality parity
+  with the 8-bit measured on-host (tool-calls 58/58 each; HumanEval 81.7% vs
+  80.5%, statistical tie — ADR-010). **Pinned, sole resident model.** A verified
+  text-only coder build (`*ForCausalLM`, no `vision_config`) and
+  tool-call-verified on oMLX, so it routes to the batched LLM engine with **no
+  engine override**. One pinned model gives the fan-out one shared prefix cache
+  and never exercises oMLX's multi-model swap path; under sustained N=8 fan-out
+  the measured footprint plateaus at ~78 GB with ~8 GB of margin to the
+  enforcer's hard threshold (`docs/workhorse-probes.md` probe 3). The DFlash speculative-decoding engine's private SSD
   cache stays disabled (`dflash_ssd_cache=false`; DFlash itself is never engaged) —
   the **main** SSD prefix cache (`--paged-ssd-cache-dir`) stays on; its live
   upstream risk is oMLX #702 (the memory guard tracks Metal allocations, not
   cache RSS).
-  **Retired ADR-006 tiers** (`Qwen3-Coder-30B-A3B-Instruct-MLX-8bit`,
-  `Qwen3-Coder-Next-MLX-4bit`) are never downloaded/aliased/validated; setup
-  actively unpins them if a prior install left them pinned. Qwen3-Coder-30B stays
-  on disk as the documented **inactive fallback**. GLM emits a reasoning preamble —
+  **Retired models** (`GLM-4.7-Flash-8bit` — renamed to alias `workhorse-8b` on
+  unpin so the primary alias transfers — plus ADR-006's
+  `Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` and `Qwen3-Coder-Next-MLX-4bit`) are
+  never downloaded/aliased/validated; setup actively unpins them if a prior
+  install left them pinned. The **8-bit stays on disk as the primary inactive
+  fallback** (quality-parity-tested rollback: pin swap + restart), Qwen3-Coder-30B
+  as the secondary. GLM emits a reasoning preamble —
   tool-bearing requests need `max_tokens ≥ ~200` (validation uses 256).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
@@ -110,8 +119,10 @@ best-current-model review.
   `--hot-cache-max-size 24GB` (oMLX accepts
   both absolute sizes and percentages; we pin an absolute value ≈ 27% of the guard
   for a deterministic footprint — one model, no second cache to fund),
-  `--max-concurrent-requests 10` (ADR-009 "The Mark": prefill-activation-bound,
-  measured 10 clean @ ~16K ctx; oMLX default is 8), `--api-key` from the 0600 file.
+  `--max-concurrent-requests 8` (ADR-010's **sustained** Mark: ADR-009's burst
+  figure of 10 collapses under back-to-back fan-out — enforcer dynamic-ceiling +
+  prefix-cache-eviction spiral, HTTP-400 storms; 8 runs sustained-clean and
+  excess requests queue at admission), `--api-key` from the 0600 file.
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
   across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
   server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
@@ -159,8 +170,10 @@ best-current-model review.
   (`007`). `.markdownlint-cli2.jsonc` configures the markdown step; `.shellcheckrc`
   (both repo root) gates shellcheck at `severity=warning` so the intentional
   `A && B || true` / `((counter++)) || true` idioms (info-level SC2015) don't fail CI.
-- `adrs/` — `009-mac-single-workhorse-cloud-frontier.md` records the current
-  model lineup (single pinned workhorse, cloud as frontier; implemented via #14),
+- `adrs/` — `010-6bit-workhorse-sustained-mark.md` records the current quant
+  (6-bit) and sustained concurrency mark (8), amending
+  `009-mac-single-workhorse-cloud-frontier.md`, which records the lineup
+  (single pinned workhorse, cloud as frontier; implemented via #14),
   superseding `006` (three-tier lineup — which superseded `004` → `003` → `002`
   → `001`) and `008` (cross-host AMD routing). The `--memory-guard-gb`/wired-limit
   from `002` and the oMLX runtime from `001` carry forward;
@@ -244,12 +257,13 @@ sudo rm -f /Library/LaunchDaemons/com.local.iogpu-wired-limit.plist
 # 3. Uninstall oMLX
 brew uninstall omlx && brew untap jundot/omlx
 
-# 4. Remove data (the API key + cache/logs, the workhorse, and any retired
-#    ADR-006 tiers still on disk)
+# 4. Remove data (the API key + cache/logs, the workhorse, and any fallback/
+#    retired models still on disk)
 rm -rf ~/.omlx          # includes the 0600 api-key
-rm -rf ~/models/GLM-4.7-Flash-8bit
-rm -rf ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
-       ~/models/Qwen3-Coder-Next-MLX-4bit   # retired tiers, if present
+rm -rf ~/models/GLM-4.7-Flash-6bit
+rm -rf ~/models/GLM-4.7-Flash-8bit \
+       ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
+       ~/models/Qwen3-Coder-Next-MLX-4bit   # fallbacks/retired tiers, if present
 ```
 
 ## Scripts

@@ -1,6 +1,7 @@
 # ADR-009: Mac as a single-model subagent workhorse, with the cloud as the frontier
 
-- Status: accepted
+- Status: accepted (workhorse quantization and concurrency mark amended by
+  [ADR-010](010-6bit-workhorse-sustained-mark.md))
 - Date: 2026-06-29 (implemented 2026-07-02, [#14](https://github.com/psmfd/local-llm/issues/14))
 
 Supersedes [ADR-006](006-multi-tier-coresident-lineup-stay-on-omlx.md) (three-tier

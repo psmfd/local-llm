@@ -33,8 +33,10 @@ over single-stream tok/s). You return advice and exact commands; you never modif
   `--paged-ssd-cache-max-size` (**defaults to 100GB** — pin it explicitly to fit
   the host's disk budget; this project sets 50GB),
   `--hot-cache-max-size` (**accepts both absolute sizes like `24GB` and percentages
-  like `20%`**), `--max-concurrent-requests` (**default 8**; this project sets 10 —
-  ADR-009 "The Mark"), `--api-key`.
+  like `20%`**), `--max-concurrent-requests` (**default 8**; this project also
+  sets 8 — ADR-010's sustained Mark: 10 was burst-clean but collapses under
+  back-to-back fan-out via the enforcer's dynamic-ceiling + prefix-cache-eviction
+  spiral, surfacing as HTTP-400 guard rejects), `--api-key`.
 - Endpoints: OpenAI `GET /v1/models`, `POST /v1/chat/completions`; Anthropic
   `POST /v1/messages`.
 - Admin panel at `/admin`; per-model `model_type_override`
@@ -57,9 +59,12 @@ over single-stream tok/s). You return advice and exact commands; you never modif
 ### Model selection (128 GB, parallel coding agents)
 
 - Prefer text-only coder MoE models with strong native tool-calling and large
-  context. Current pick (ADR-009 workhorse): `mlx-community/GLM-4.7-Flash-8bit`
-  (~30 GB, `Glm4MoeLiteForCausalLM`, 202K native context, MLA KV compression —
-  verified ≈ GQA footprint on oMLX). Verified fallback kept on disk:
+  context. Current pick (ADR-009 lineup, ADR-010 quant):
+  `mlx-community/GLM-4.7-Flash-6bit` (~24 GB, `Glm4MoeLiteForCausalLM`, 202K
+  native context, MLA KV compression — verified ≈ GQA footprint on oMLX;
+  quality parity with the 8-bit measured on-host: tool-calls 58/58 each,
+  HumanEval statistical tie). Fallbacks kept on disk: `GLM-4.7-Flash-8bit`
+  (primary, alias `workhorse-8b`, unpinned) and
   `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` (~30.6 GB,
   `Qwen3MoeForCausalLM`, GQA, 262,144 native context, `rope_scaling: null`).
 - A single resident model maximizes the KV/prefix-cache budget under the wired

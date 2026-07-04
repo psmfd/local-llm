@@ -67,9 +67,11 @@ fi
 # --paged-ssd-cache-max-size caps the SSD tier of the prefix cache; left unset,
 # oMLX defaults it to 100GB — past the setup preflight's 90 GB free-disk budget.
 # 50GB keeps model (~30 GB) + SSD cache inside that budget with ~10 GB slack.
-# --max-concurrent-requests 10 is ADR-009's "Mark": safe concurrency is
-# prefill-activation-bound and context-dependent (measured 10 clean @ ~16K ctx);
-# excess requests queue at admission rather than aborting mid-flight.
+# --max-concurrent-requests 8 is ADR-010's SUSTAINED Mark: 10 was clean as a
+# single burst (ADR-009) but collapses under back-to-back fan-out — the memory
+# enforcer's dynamic ceiling drops and it evicts the prefix cache, producing an
+# HTTP-400 reject storm (measured 2026-07-04; docs/workhorse-probes.md probe 3).
+# At 8 the same sustained load runs clean and excess requests queue at admission.
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \
@@ -80,5 +82,5 @@ exec "__BREW_PREFIX__/bin/omlx" serve \
     --paged-ssd-cache-dir "__CACHE_DIR__" \
     --paged-ssd-cache-max-size 50GB \
     --hot-cache-max-size 24GB \
-    --max-concurrent-requests 10 \
+    --max-concurrent-requests 8 \
     --api-key "$api_key"
