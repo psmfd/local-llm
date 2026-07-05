@@ -81,6 +81,7 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 | [`.github/workflows/`](.github/workflows/) | CI lint gate — `validate` (shellcheck + markdownlint + plist well-formedness) and `lint-pr-title` (Conventional Commits), required checks on the branch rulesets ([ADR-007](adrs/007-ci-rulesets-and-release-strategy.md)); plus `upstream-watch` (weekly upstream oMLX release/issue watch that files tracking issues — not a required check) |
 | [`docs/router-wiring.md`](docs/router-wiring.md) | Wiring the server into a .NET `IInferenceBackend` / `FallbackInferenceRouter` |
 | [`docs/runtime-tiering-research.md`](docs/runtime-tiering-research.md) | Research note behind [ADR-006](adrs/006-multi-tier-coresident-lineup-stay-on-omlx.md) — runtime reassessment, on-host bake-off, and tier selection |
+| [`docs/amd-augmentation-research.md`](docs/amd-augmentation-research.md) | Research note (2026-07-05) behind the proposed AMD-host augmentation roles — eval/CI farm first, gated overflow lane; GLM-on-gfx1100 disqualified — assessment only, ADR pending |
 | [`omlx-setup-prompt.md`](omlx-setup-prompt.md) | Historical source prompt only — not a source of truth |
 
 ## Upgrading from the three-tier (ADR-006) install
