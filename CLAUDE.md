@@ -197,6 +197,12 @@ best-current-model review.
 - `docs/workhorse-probes.md` — one-time on-host probes to run before trusting the
   workhorse config under load (long-context MLA check, `enable_thinking`
   pass-through).
+- `docs/amd-augmentation-research.md` — research note (2026-07-05) on reopening
+  the AMD RX 7900 XTX host as a **secondary augmentation** (not an ADR-008-style
+  routing peer): eval/CI farm first, overflow lane gated on the exact
+  guard-reject 400 (never Mac-unreachable), GLM-4.7-Flash disqualified on
+  gfx1100 (MLA is CDNA3-only in vLLM) — Qwen3-Coder-30B-A3B Q4 is the overflow
+  model. Assessment only; the decision record would be a new ADR amending 009.
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
   Keep it in sync when flags, model IDs, or the step order change.
 
