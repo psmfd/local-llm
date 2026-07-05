@@ -126,6 +126,13 @@ best-current-model review.
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
   across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
   server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
+- **macOS floor and ceiling:** MLX engages the M5 GPU **Neural Accelerators**
+  only on **macOS ≥ 26.2** (verified engaged on-host 2026-07-05: the oMLX 0.4.4
+  brew keg bundles MLX 0.31.2; 57 TFLOPS fp16 GEMM — probe 4 in
+  `docs/workhorse-probes.md`, #27). Hold the host at **macOS 26.x** — do not
+  upgrade to macOS 27 while jundot/omlx#1835 (10–15× long-context slowdown,
+  suspected paged-cache-tier interaction) is open; re-run the probe suite after
+  any macOS or oMLX upgrade.
 - **On-demand lifecycle (no login autostart):** per-user LaunchAgent running a start
   wrapper that carries the tuned flags (`brew services` only starts with zero-config
   defaults). The agent is `RunAtLoad=false` + `KeepAlive=false`, so login registers
