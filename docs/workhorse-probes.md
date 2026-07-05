@@ -1,9 +1,10 @@
 # Workhorse probes — one-time on-host checks before trusting the config
 
-Two short probes to run once on the M5 Max after provisioning (and again after
-any oMLX or model update), closing the residual risks the ADR-009 review
-flagged. Neither is part of `--validate` — both need a long prompt or a
-model-behavior judgement that the scripted checks deliberately avoid.
+Short probes to run once on the M5 Max after provisioning (and again after
+any oMLX, macOS, or model update), closing the residual risks the ADR-009
+review flagged. None is part of `--validate` — each needs a long prompt, a
+model-behavior judgement, or a host-level measurement that the scripted checks
+deliberately avoid.
 
 > **Last run: 2026-07-02, oMLX 0.4.4 — both probes PASS.** Probe 1: baseline
 > 30.0 GB resident; a 19,470-token prompt added +2.1 GB resident / +7.0 GB peak
@@ -15,6 +16,11 @@ model-behavior judgement that the scripted checks deliberately avoid.
 >
 > **Probe 3 run: 2026-07-04, oMLX 0.4.4 — sustained N=10 FAILS, N=8 PASSES**
 > (see the probe-3 section below for the full matrix, including the 6-bit A/B).
+>
+> **Probe 4 run: 2026-07-05, oMLX 0.4.4 (MLX 0.31.2), macOS 26.5.1 — PASS.**
+> M5 Neural Accelerators engaged by the Homebrew build: 57.0 TFLOPS fp16 /
+> 57.1 TFLOPS bf16 on the GEMM probe (~3× plain-shader class). The oMLX
+> v0.2.19 "must use the `macos26-tahoe` DMG" guidance is stale at 0.4.4 (#27).
 
 Prereqs: server provisioned, `omlxctl start` done, `KEY="$(cat ~/.omlx/api-key)"`.
 
@@ -139,6 +145,64 @@ resident vs 30.0 GB): MLA probe PASS (+2.0 GB resident / +5.6 GB peak @ 15,959
 tokens); tool-calls 10/10 well-formed (mean 1.2 s vs 8-bit's 10/10 @ 1.8 s);
 sustained results in the matrix above. No fidelity regression observed on
 these probes; coding-quality delta not benchmarked.
+
+## 4. M5 Neural Accelerator engagement probe
+
+**Why.** MLX exploits the M5 GPU's Neural Accelerators (dedicated matmul units;
+Apple cites up to ~4× prefill vs M4 on a similar MoE shape) only when two gates
+hold: **macOS ≥ 26.2** and an MLX core new enough (M5 support landed in mlx
+v0.30.0; M5 Pro/Max tuning in v0.31.1). oMLX's v0.2.19 release notes told M5
+owners to use the `macos26-tahoe` DMG, raising the question of whether the
+Homebrew tap build engages the accelerators at all. For a shared-long-prefix
+fan-out workload the uplift is concentrated exactly where it matters —
+compute-bound prefill/TTFT — so verify engagement instead of assuming it.
+
+**Procedure.**
+
+1. Check the version gates:
+
+   ```bash
+   sw_vers -productVersion          # must be >= 26.2
+   /opt/homebrew/opt/omlx/libexec/bin/python -c \
+     "import mlx.core as mx; print(mx.__version__)"   # must be >= 0.31.1
+   ```
+
+2. Run the GEMM throughput probe with the keg's own interpreter (safe to run
+   with the server up — two 4096×4096 fp16 matrices are ~32 MB each):
+
+   ```bash
+   /opt/homebrew/opt/omlx/libexec/bin/python - <<'EOF'
+   import time
+   import mlx.core as mx
+   N, iters = 4096, 50
+   for dtype, name in [(mx.float16, "fp16"), (mx.bfloat16, "bf16")]:
+       a = mx.random.normal((N, N)).astype(dtype)
+       b = mx.random.normal((N, N)).astype(dtype)
+       mx.eval(a, b)
+       for _ in range(5):
+           mx.eval(a @ b)
+       t0 = time.perf_counter()
+       for _ in range(iters):
+           mx.eval(a @ b)
+       dt = time.perf_counter() - t0
+       print(f"{name}: {2*N**3*iters/dt/1e12:.1f} TFLOPS")
+   EOF
+   ```
+
+   MLX evaluates lazily — the per-iteration `mx.eval` is load-bearing. Without
+   it the loop times graph construction only and reports impossible numbers
+   (a broken first attempt showed 1,563 TFLOPS).
+
+**Pass:** ≥ ~40 TFLOPS fp16 — only the Neural Accelerator path reaches that on
+this chip class (plain Metal shaders land well under ~20). **Fail:** shader-class
+numbers despite both version gates passing → the installed build is not
+engaging the accelerators; check how the keg was built (brew tap vs DMG) and
+the bundled mlx version before touching serving config.
+
+**Last run (2026-07-05, oMLX 0.4.4 brew keg, MLX 0.31.2, macOS 26.5.1):**
+57.0 TFLOPS fp16 / 57.1 TFLOPS bf16 — PASS. Re-run after any oMLX upgrade
+(the bundled MLX can move) and after any macOS update (see also the macOS-27
+hold: jundot/omlx#1835).
 
 Note the outcome (date, oMLX version, pass/fail, measured numbers) in the PR or
 issue that prompted the re-run. If probe 1 fails, that is grounds to revisit
