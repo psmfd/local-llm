@@ -10,7 +10,9 @@
 // compat flags for oMLX's OpenAI-completions endpoint:
 //   supportsDeveloperRole: false    — oMLX/Qwen do not accept the 'developer' role
 //   supportsReasoningEffort: false  — reasoning_effort is not implemented
-//   supportsUsageInStreaming: false — streaming usage stats not guaranteed
+//   supportsUsageInStreaming: true  — oMLX serves usage in the final stream chunk
+//                                     when stream_options.include_usage is requested
+//                                     (verified live 2026-07-05; psmfd/local-llm#34)
 //
 // Single workhorse model (ADR-009), addressed by its oMLX ALIAS (verified to
 // resolve on the installed version):
@@ -30,7 +32,7 @@
       "compat": {
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
-        "supportsUsageInStreaming": false
+        "supportsUsageInStreaming": true
       },
       "models": [
         {
