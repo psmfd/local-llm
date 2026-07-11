@@ -176,7 +176,10 @@ best-current-model review.
   `protect-dev`/`protect-main` rulesets — renaming a job breaks its ruleset binding
   (`007`). `upstream-watch.yml` is a weekly scheduled watch for upstream oMLX
   events (a stable release newer than its pinned `KNOWN_STABLE`; closure of
-  omlx#1835) that files idempotent tracking issues (#30) — not a required check. `.markdownlint-cli2.jsonc` configures the markdown step; `.shellcheckrc`
+  omlx#1835; clearance of the 0.5.0 regression gate omlx#2179/#2180, which
+  holds the host at oMLX 0.4.4 with the formula `brew pin`ned — the deferred
+  0.4.4 → 0.5.x upgrade is tracked in #39) that files idempotent tracking
+  issues (#30) — not a required check. `.markdownlint-cli2.jsonc` configures the markdown step; `.shellcheckrc`
   (both repo root) gates shellcheck at `severity=warning` so the intentional
   `A && B || true` / `((counter++)) || true` idioms (info-level SC2015) don't fail CI.
 - `adrs/` — `010-6bit-workhorse-sustained-mark.md` records the current quant
