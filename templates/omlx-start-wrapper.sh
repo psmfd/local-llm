@@ -66,7 +66,7 @@ fi
 # from ADR-006's 18GB: one model, no second cache to fund; ADR-009).
 # --paged-ssd-cache-max-size caps the SSD tier of the prefix cache; left unset,
 # oMLX defaults it to 100GB — past the setup preflight's 90 GB free-disk budget.
-# 50GB keeps model (~30 GB) + SSD cache inside that budget with ~10 GB slack.
+# 50GB keeps model (~24 GB) + SSD cache inside that budget with ~16 GB slack.
 # --max-concurrent-requests 8 is ADR-010's SUSTAINED Mark: 10 was clean as a
 # single burst (ADR-009) but collapses under back-to-back fan-out — the memory
 # enforcer's dynamic ceiling drops and it evicts the prefix cache, producing an
