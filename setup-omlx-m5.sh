@@ -12,7 +12,7 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the coding-workhorse model (~30 GB) via
+#   --download-model   Download the coding-workhorse model (~24 GB) via
 #                      `hf download`. Off by default. Retired ADR-006 tiers are
 #                      never downloaded. Existing model dirs are skipped (never
 #                      re-downloaded or deleted), so this is safe to re-run when
