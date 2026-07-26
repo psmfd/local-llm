@@ -67,11 +67,13 @@ fi
 # --paged-ssd-cache-max-size caps the SSD tier of the prefix cache; left unset,
 # oMLX defaults it to 100GB — past the setup preflight's 90 GB free-disk budget.
 # 50GB keeps model (~24 GB) + SSD cache inside that budget with ~16 GB slack.
-# --max-concurrent-requests 8 is ADR-010's SUSTAINED Mark: 10 was clean as a
-# single burst (ADR-009) but collapses under back-to-back fan-out — the memory
-# enforcer's dynamic ceiling drops and it evicts the prefix cache, producing an
-# HTTP-400 reject storm (measured 2026-07-04; docs/workhorse-probes.md probe 3).
-# At 8 the same sustained load runs clean and excess requests queue at admission.
+# --max-concurrent-requests 4 is ADR-012's large-context Mark, amending
+# ADR-010's 8 (which was measured at ~16K contexts). The KV pool is ~83K tokens
+# of TOTAL concurrent context (66 GB dynamic ceiling − ~30 GB weights/baseline
+# at ~0.433 GB/1K tokens — ADR-011); eight admitted 25-45K agentic streams
+# oversubscribe it ~3× (2026-07-26 incident: guard 400s at 40K/53K, decode
+# collapse, cache-evict spiral — pi_config#889). At 4 — matching the pi
+# subagent spawn cap — excess requests queue at admission, consuming no KV.
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \
@@ -82,5 +84,5 @@ exec "__BREW_PREFIX__/bin/omlx" serve \
     --paged-ssd-cache-dir "__CACHE_DIR__" \
     --paged-ssd-cache-max-size 50GB \
     --hot-cache-max-size 24GB \
-    --max-concurrent-requests 8 \
+    --max-concurrent-requests 4 \
     --api-key "$api_key"

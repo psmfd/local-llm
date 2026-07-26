@@ -146,7 +146,10 @@ tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 # the guard 400s. Concurrency is the other cap (ADR-009 "The Mark", ADR-010).
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 PI_CONTEXT_WINDOW=76800
-PI_MAX_TOKENS=16384
+# maxTokens 8192: pi's output shrink ladder caps completions at 8,000
+# (pi_config ADR-0108); a larger value only inflates the prefill guard's
+# decode reservation on a KV-pool-constrained host (ADR-012).
+PI_MAX_TOKENS=8192
 
 DAEMON_LABEL="com.local.iogpu-wired-limit"
 DAEMON_PLIST="/Library/LaunchDaemons/${DAEMON_LABEL}.plist"
