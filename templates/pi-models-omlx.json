@@ -19,9 +19,11 @@
 //   coding-workhorse  GLM-4.7-Flash-6bit  pinned, sole resident model (ADR-010)
 // High-fidelity work routes to the cloud frontier, not this provider.
 //
-// contextWindow is held to 131072 (inside GLM's 202K native context): safe
-// concurrency is prefill-activation-bound and falls as context grows (ADR-009
-// "The Mark": 10 @ ~16K ctx), so sessions should not fill the native window.
+// contextWindow is held to 76800 (far inside GLM's 202K native context): the
+// prefill memory guard rejects single prefills above ~84K tokens at its
+// observed idle dynamic ceiling (66 GB; KV+SDPA ~0.433 GB/1K tokens — ADR-011,
+// pi_config#889), and safe concurrency is prefill-activation-bound (ADR-009
+// "The Mark"). 76800 keeps pi compacting before the guard returns 400s.
 {
   "providers": {
     "omlx": {

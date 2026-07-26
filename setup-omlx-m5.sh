@@ -137,13 +137,15 @@ tier_alias() { local r="${1#*|}"; printf '%s' "${r%%|*}"; }
 tier_pin()   { printf '%s' "${1##*|}"; }
 tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 
-# Pi coding-agent provider registration (--configure-pi). contextWindow stays at
-# 131072 — comfortably inside GLM-4.7-Flash's 202K native context while keeping
-# the fan-out honest: safe concurrency is prefill-activation-bound and falls as
-# context grows (ADR-009 "The Mark": 10 @ ~16K ctx), so clients should not be
-# invited to fill the full native window.
+# Pi coding-agent provider registration (--configure-pi). contextWindow is
+# 76800 — far inside GLM-4.7-Flash's 202K native context because the prefill
+# memory guard, not the model, is the binding limit: KV+SDPA grows ~0.433 GB
+# per 1K prompt tokens and the guard's dynamic ceiling (66 GB observed idle,
+# lower under load) rejects single prefills above ~84K tokens (ADR-011;
+# pi_config#889 ladder benchmark). 76800 leaves margin so pi compacts before
+# the guard 400s. Concurrency is the other cap (ADR-009 "The Mark", ADR-010).
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-PI_CONTEXT_WINDOW=131072
+PI_CONTEXT_WINDOW=76800
 PI_MAX_TOKENS=16384
 
 DAEMON_LABEL="com.local.iogpu-wired-limit"
