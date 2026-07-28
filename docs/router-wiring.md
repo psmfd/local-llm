@@ -245,11 +245,13 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 - **Role routing.** `Fast` / `Balanced` → **Mac oMLX workhorse** primary → cloud
   fallback. `Quality` → oMLX throws `InferenceUnavailableException` (no local
   quality tier — the alias dictionary omits the role) → **cloud frontier**.
-- **Saturation.** oMLX runs at `--max-concurrent-requests 8` (**the sustained
-  Mark**, [ADR-010](../adrs/010-6bit-workhorse-sustained-mark.md): the earlier
-  burst figure of 10 collapses under back-to-back fan-out — measured 2026-07-04,
-  `docs/workhorse-probes.md` probe 3; at 8, sustained ~16K-context load runs
-  clean and excess requests queue at admission).
+- **Saturation.** oMLX runs at `--max-concurrent-requests 4` (**the
+  large-context mark**,
+  [ADR-012](../adrs/012-concurrency-mark-4-large-context.md):
+  [ADR-010](../adrs/010-6bit-workhorse-sustained-mark.md)'s mark of 8 was
+  measured at ~16K contexts, but real 25–45K agentic streams oversubscribe the
+  ~83K-token shared KV pool ~3× — 2026-07-26 incident; at 4, matching the pi
+  subagent spawn cap, excess requests queue at admission and consume no KV).
   **Saturation surfaces as HTTP `400`, not 429/503**: when the memory guard's
   preflight rejects, the body carries
   `"oMLX prefill memory guard rejected this prompt"`. The router MUST treat that
