@@ -15,7 +15,13 @@ The current architecture: the Mac runs a **single pinned workhorse model** (one
 3B-active MoE), with a **cloud provider as the quality frontier** — decided in
 [`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md),
 as amended by [`adrs/010-6bit-workhorse-sustained-mark.md`](adrs/010-6bit-workhorse-sustained-mark.md)
-(quant 8-bit → **6-bit**, concurrency mark 10 → **8**).
+(quant 8-bit → **6-bit**),
+[`adrs/011-pi-context-window-guard-boundary.md`](adrs/011-pi-context-window-guard-boundary.md)
+(pi-advertised contextWindow 131072 → **76800**, the measured prefill-guard
+boundary), and
+[`adrs/012-concurrency-mark-4-large-context.md`](adrs/012-concurrency-mark-4-large-context.md)
+(concurrency mark 8 → **4** and pi maxTokens 16384 → **8192** for
+large-context agentic load).
 
 Decision history — each ADR's `Status:` front-matter carries the supersession
 chain; consult the ADRs rather than re-deriving it:
@@ -146,10 +152,15 @@ best-current-model review.
   `--hot-cache-max-size 24GB` (oMLX accepts
   both absolute sizes and percentages; we pin an absolute value ≈ 27% of the guard
   for a deterministic footprint — one model, no second cache to fund),
-  `--max-concurrent-requests 8` (ADR-010's **sustained** Mark: ADR-009's burst
-  figure of 10 collapses under back-to-back fan-out — enforcer dynamic-ceiling +
-  prefix-cache-eviction spiral, HTTP-400 storms; 8 runs sustained-clean and
-  excess requests queue at admission), `--api-key` from the 0600 file.
+  `--max-concurrent-requests 4` (ADR-012's **large-context** mark: ADR-010's
+  mark of 8 was measured at ~16K contexts, but the KV pool holds only ~83K
+  tokens of *total* concurrent context — ~0.433 GB/1K tokens against the
+  guard's 66 GB dynamic ceiling, ADR-011 — and eight 25–45K agentic streams
+  oversubscribe it ~3×: guard 400s, decode collapse, cache-evict spiral. At 4,
+  matching the pi subagent spawn cap, excess requests queue at admission and
+  consume no KV), `--api-key` from the 0600 file. The pi provider advertises
+  `contextWindow 76800` (the measured prefill-guard acceptance boundary,
+  ADR-011) and `maxTokens 8192` (ADR-012).
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
   across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
   server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
@@ -203,7 +214,9 @@ best-current-model review.
   `protect-dev`/`protect-main` rulesets — renaming a job breaks its ruleset
   binding (ADR-007). The workflow files carry their own config comments.
 - `adrs/` — decision records (MADR minimal template in `TEMPLATE.md`; sequential,
-  zero-padded three digits). ADR-009 + ADR-010 are the current lineup decision;
+  zero-padded three digits). ADR-009 + ADR-010 are the current lineup decision,
+  with ADR-011 (pi contextWindow 76800) and ADR-012 (concurrency mark 4,
+  maxTokens 8192) the current serving-boundary amendments;
   each file's `Status:` line carries the supersession chain (see "What this
   repository is" above).
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
