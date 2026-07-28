@@ -21,6 +21,22 @@ deliberately avoid.
 > M5 Neural Accelerators engaged by the Homebrew build: 57.0 TFLOPS fp16 /
 > 57.1 TFLOPS bf16 on the GEMM probe (~3× plain-shader class). The oMLX
 > v0.2.19 "must use the `macos26-tahoe` DMG" guidance is stale at 0.4.4 (#27).
+>
+> **0.5.3 re-baseline: 2026-07-28, oMLX 0.5.3 (MLX 0.32.0), macOS 26.5.2 —
+> probes 3 + 4 PASS; prefill-ladder re-measured** (post-upgrade run for
+> #56/#39; see the "0.5.3 re-baseline" subsections under probes 3 and 4).
+> Highlights: probe 4 unchanged at 57.4/57.3 TFLOPS; sustained mark 4 ran an
+> incident-shaped load (8×~28.3K-token cold streams) clean — 16/16, zero guard
+> rejects; the guard's idle dynamic ceiling rose 66 → **73.08 GB** and the
+> single-prefill acceptance boundary moved ~84K → **~98K tokens** (81K
+> accepted outright), so ADR-011's `contextWindow 76800` and ADR-012's mark 4
+> stand with *more* margin — no config change. TurboQuant KV compression is
+> **off** for the workhorse (`turboquant_kv_bits=None`), so the slope stays
+> comparable across versions. One contract change: an over-boundary prompt now
+> surfaces as an **HTTP 200 "JSON keepalive prefill rejected"** error after a
+> multi-minute stall, not the 0.4.4 instant 400 — router/pi handling tracked
+> in #58. The 0.5.1 SSD-cache re-keying invalidated the on-disk prefix cache
+> once (4,974 blocks / 65.77 GB skipped at first scan) — expected, one-time.
 
 Prereqs: server provisioned, `omlxctl start` done, `KEY="$(cat ~/.omlx/api-key)"`.
 
@@ -146,6 +162,65 @@ tokens); tool-calls 10/10 well-formed (mean 1.2 s vs 8-bit's 10/10 @ 1.8 s);
 sustained results in the matrix above. No fidelity regression observed on
 these probes; coding-quality delta not benchmarked.
 
+### 0.5.3 re-baseline (2026-07-28, mark 4, MLX 0.32.0, macOS 26.5.2)
+
+Post-upgrade re-run for #56/#39 after the 0.5.2 memory-guard retune
+("eviction now starts at the soft watermark" + #2179 pooled-buffer
+self-recovery) invalidated the 0.4.4-fit constants.
+
+**Sustained run (harsher than canonical).** The generated prefixes tokenized
+to **~28.3K tokens** (not the canonical ~16K), so the run reproduced the
+2026-07-26 incident shape directly: back-to-back waves of 8 concurrent unique
+cold ~28.3K prompts (server admits 4, queues 4; `max_tokens` 300), ~13 min.
+Result: **16/16 ok, zero guard 400s, zero `adaptive_prefill_throttle` /
+eviction lines**, footprint plateau ~63 GB, host memory pressure normal.
+The mark-8 failure mode (400 storm + cache-evict spiral) did not reproduce at
+mark 4 on 0.5.3. Per-stream decode collapsed to ~0.8–1.6 tok/s while
+concurrent prefills ran — the head-of-line fairness issue tracked in #45, not
+a regression. Wave wall time ~372–390 s for 8×28.3K cold streams.
+
+**Prefill ladder (pi_config#889 method, fresh restart, single stream, unique
+cache-busting payloads).** Accepted rungs, wall time and process footprint
+(peak is cumulative):
+
+| Prompt tokens | Wall time | Footprint cur → peak |
+| --- | --- | --- |
+| 8,161 | 4.3 s | 23.8 → 27.5 GB |
+| 16,249 | 12.2 s | 24.6 → 29.8 GB |
+| 32,496 | 42.5 s | 26.4 → 36.2 GB |
+| 48,648 | 93.8 s | 29.0 → 44.0 GB |
+| 64,898 | 169.7 s | 32.6 → 52.7 GB |
+| 72,905 | 213.2 s | 36.7 → 59.4 GB |
+| 81,105 | 263.8 s | 41.2 → 66.5 GB |
+
+The ~88K and ~96K rungs were **rejected by the guard** — but on 0.5.3 the
+rejection is no longer an instant pre-compute 400: the scheduler paused the
+request (`adaptive_prefill_throttle`), ran the 0.5.2 pooled-buffer reclaim
+(recovered only 2.58/3.27 GB, "no idle model to evict"), then rejected ~5 min
+in as an **HTTP 200 "JSON keepalive prefill rejected"** error body with no
+`usage` (guard lines: "~91.83 GB peak (current 53.17 GB + KV+SDPA 38.65 GB)
+but dynamic ceiling is 73.08 GB"). Client-side capacity detection must handle
+both paths — tracked in #58.
+
+**Derived constants (0.5.3), vs ADR-011's 0.4.4 fit:**
+
+- Guard dynamic ceiling at idle: **73.08 GB** (was 66 GB).
+- Guard estimator slope: **~0.44 GB/1K tokens** (88K rung: 38.65 GB; 96K rung:
+  42.25 GB — effectively unchanged from 0.433). Actual per-rung footprint cost
+  measured lower (~0.37 GB/1K), i.e. the estimator is conservative.
+- Fresh-idle acceptance boundary: **~98K tokens** by ADR-011's formula
+  `(ceiling − current≈30 GB) / slope` (was ~84K); 81K accepted outright.
+- **Caveat:** retained prefix cache grew guard "current" from ~30 GB to
+  **53.17 GB** over the ladder, shrinking the *effective* boundary to ~45K
+  under long uptimes with a hot cache — throttle-time reclaim recovered only
+  ~3 GB. The advertised window must keep margin for this, not just for host
+  load.
+
+**Config consequence: none.** `contextWindow 76800` is ~78% of the new idle
+boundary (was ~91% of the old) and the wall-time cliff (264 s at 81K) still
+argues against inviting larger contexts; mark 4 ran the incident shape clean.
+ADR-011/012 stand re-affirmed with wider margin — no amendment needed.
+
 ## 4. M5 Neural Accelerator engagement probe
 
 **Why.** MLX exploits the M5 GPU's Neural Accelerators (dedicated matmul units;
@@ -199,10 +274,12 @@ numbers despite both version gates passing → the installed build is not
 engaging the accelerators; check how the keg was built (brew tap vs DMG) and
 the bundled mlx version before touching serving config.
 
-**Last run (2026-07-05, oMLX 0.4.4 brew keg, MLX 0.31.2, macOS 26.5.1):**
-57.0 TFLOPS fp16 / 57.1 TFLOPS bf16 — PASS. Re-run after any oMLX upgrade
-(the bundled MLX can move) and after any macOS update (see also the macOS-27
-hold: jundot/omlx#1835).
+**Last run (2026-07-28, oMLX 0.5.3 brew keg, MLX 0.32.0, macOS 26.5.2):**
+57.4 TFLOPS fp16 / 57.3 TFLOPS bf16 — PASS. The 0.5.0 "NAX-aware dispatch"
+change did not move the M5 Max GEMM baseline (2026-07-05 on 0.4.4 / MLX
+0.31.2: 57.0 / 57.1). Re-run after any oMLX upgrade (the bundled MLX can
+move) and after any macOS update (see also the macOS-27 hold:
+jundot/omlx#1835).
 
 Note the outcome (date, oMLX version, pass/fail, measured numbers) in the PR or
 issue that prompted the re-run. If probe 1 fails, that is grounds to revisit

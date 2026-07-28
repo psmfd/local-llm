@@ -1,19 +1,17 @@
 name: upstream-watch
 
 # Weekly watch for the upstream jundot/omlx events this repo is waiting on
-# (#30): a stable release newer than the pinned KNOWN_STABLE (gates the probe-3
-# re-run — #28), closure of jundot/omlx#1835 (the macOS-27 long-context
-# regression — the host holds at macOS 26.x while it is open, see CLAUDE.md),
-# and clearance of the 0.5.0 regression gate — jundot/omlx#2179 (stuck prefill
-# token guard, no remote reset) and #2180 (failed LRU eviction discards a
-# reconstructed SSD prefix) — which holds the host at oMLX 0.4.4 (#39).
+# (#30): a stable release newer than the pinned KNOWN_STABLE (gates a probe-3
+# re-run before any upgrade is trusted) and closure of jundot/omlx#1835 (the
+# macOS-27 long-context regression — the host holds at macOS 26.x while it is
+# open, see CLAUDE.md). The 0.5.0 regression-gate step was removed after the
+# 0.4.4→0.5.3 upgrade landed (omlx#2179/#2180 fixed in 0.5.2/0.5.1).
 # Each event files one tracking issue, deduped by a title search across open
 # AND closed issues so closing the tracking issue never re-triggers a duplicate.
 # This job is NOT a required check on any ruleset (adrs/007) — renaming it is
 # safe. Maintenance: bump KNOWN_STABLE after each handled release; remove or
-# repoint WATCHED_ISSUE once #1835 resolves; remove REGRESSION_GATE_ISSUES and
-# its step once the 0.4.4→0.5.x upgrade lands; retire the workflow when
-# nothing is being watched.
+# repoint WATCHED_ISSUE once #1835 resolves; retire the workflow when nothing
+# is being watched.
 
 on:
   schedule:
@@ -26,9 +24,8 @@ permissions:
 
 env:
   GH_TOKEN: ${{ github.token }}
-  KNOWN_STABLE: "0.5.0"
+  KNOWN_STABLE: "0.5.3"
   WATCHED_ISSUE: "1835"
-  REGRESSION_GATE_ISSUES: "2179 2180"
 
 jobs:
   upstream-watch:
@@ -61,9 +58,9 @@ jobs:
 
           Next steps:
 
-          - Re-run \`docs/workhorse-probes.md\` probe 3 per #28 (the 0.4.5
-            line ships a Memory Guard threshold retune that can move the
-            sustained-safe concurrency mark).
+          - Re-run \`docs/workhorse-probes.md\` probe 3 before trusting the
+            upgrade (upstream Memory Guard retunes can move the sustained-safe
+            concurrency mark and the prefill-guard ceiling).
           - Bump \`KNOWN_STABLE\` in \`.github/workflows/upstream-watch.yml\`
             once handled.
 
@@ -113,54 +110,3 @@ jobs:
             --title "upstream watch: omlx#${WATCHED_ISSUE} (${marker}) closed — re-evaluate the macOS 26.x hold" \
             --body-file "${body_file}"
           echo "OK    [watch] filed tracking issue for omlx#${WATCHED_ISSUE}"
-
-      - name: Check the 0.5.0 regression gate (omlx#2179 + omlx#2180)
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          open_count=0
-          for n in ${REGRESSION_GATE_ISSUES}; do
-            state="$(gh api "repos/jundot/omlx/issues/${n}" --jq .state)"
-            echo "INFO  [gate ] jundot/omlx#${n} state: ${state}"
-            if [ "${state}" = "open" ]; then
-              open_count=$((open_count + 1))
-            fi
-          done
-          if [ "${open_count}" != "0" ]; then
-            echo "OK    [gate ] ${open_count} gate issue(s) still open — oMLX 0.4.4 hold stands (#39)"
-            exit 0
-          fi
-          marker="0.5.0 regression gate cleared"
-          count="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state all \
-            --search "\"${marker}\" in:title" --json number --jq 'length')"
-          if [ "${count}" != "0" ]; then
-            echo "SKIP  [gate ] tracking issue already exists for the regression gate"
-            exit 0
-          fi
-          body_file="$(mktemp)"
-          cat > "${body_file}" <<EOF
-          The scheduled upstream watch (#30) detected that both 0.5.0
-          admission/eviction regressions holding the host at oMLX 0.4.4 —
-          jundot/omlx#2179 (prefill token guard fills with no remote reset)
-          and jundot/omlx#2180 (failed prefill LRU eviction discards a valid
-          reconstructed SSD prefix) — are now closed.
-
-          Next steps:
-
-          - Resume the deferred 0.4.4 → 0.5.x upgrade per the evaluation
-            checklist on #39: keg-preserving upgrade
-            (\`HOMEBREW_NO_INSTALL_CLEANUP=1\`), \`settings.json\` diff +
-            pin check, \`--validate\`, probe 4, and a probe-3 re-run
-            watching for a stuck (non-self-recovering) guard state.
-          - \`brew unpin jundot/omlx/omlx\` before upgrading (pinned while
-            the gate was open).
-          - Remove \`REGRESSION_GATE_ISSUES\` and this step from
-            \`.github/workflows/upstream-watch.yml\` once handled.
-
-          Upstream: https://github.com/jundot/omlx/issues/2179,
-          https://github.com/jundot/omlx/issues/2180
-          EOF
-          gh issue create --repo "${GITHUB_REPOSITORY}" \
-            --title "upstream watch: ${marker} (omlx#2179 + omlx#2180 closed) — resume the 0.4.4 → 0.5.x upgrade" \
-            --body-file "${body_file}"
-          echo "OK    [gate ] filed tracking issue for the cleared regression gate"
