@@ -120,8 +120,9 @@ best-current-model review.
 - **Runtime:** oMLX via Homebrew —
   `brew tap jundot/omlx https://github.com/jundot/omlx && brew install omlx`.
   The formula is `brew pin`ned at the version tracked by `upstream-watch.yml`'s
-  `KNOWN_STABLE` while the 0.5.x regression gate holds (the deferred upgrade is
-  tracked in #39).
+  `KNOWN_STABLE` (0.5.3 — upgraded 2026-07-28 after the 0.5.0 regression gate
+  cleared; the 0.4.4 keg is retained for rollback). Re-run the probe suite
+  before trusting any future bump.
 - **Model (single workhorse, text-only; ADR-009 lineup, ADR-010 quant):**
   **`coding-workhorse`** — `mlx-community/GLM-4.7-Flash-6bit`
   (`Glm4MoeLiteForCausalLM`, MoE ~3B active, 202K ctx, MLA KV compression).
