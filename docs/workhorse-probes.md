@@ -22,6 +22,14 @@ deliberately avoid.
 > 57.1 TFLOPS bf16 on the GEMM probe (~3× plain-shader class). The oMLX
 > v0.2.19 "must use the `macos26-tahoe` DMG" guidance is stale at 0.4.4 (#27).
 >
+> **Probe 2 A/B: 2026-07-20, oMLX 0.4.4 — thinking-off PASSES tool-call
+> fidelity; suppression ratified (#44).** 12-scenario × 3-rep A/B, 36 calls
+> per arm: 29/36 correct thinking-off vs 27/36 thinking-on, all 72 calls
+> well-formed, ~3× mean latency reduction (1,849 → 626 ms single-stream).
+> Delivery is client-side via the pi_config `payload-tuner` extension
+> (psmfd/pi_config#769, its ADR-0106), verified not to churn the oMLX prefix
+> cache. See the probe-2 A/B subsection and `probes/thinking-ab/`.
+>
 > **0.5.3 re-baseline: 2026-07-28, oMLX 0.5.3 (MLX 0.32.0), macOS 26.5.2 —
 > probes 3 + 4 PASS; prefill-ladder re-measured** (post-upgrade run for
 > #56/#39; see the "0.5.3 re-baseline" subsections under probes 3 and 4).
@@ -103,6 +111,42 @@ tool-bearing requests instead of relying only on generous `max_tokens` (keep
 `max_tokens ≥ 200` anyway as the belt-and-suspenders floor). **If oMLX rejects
 or ignores the field:** stick with the `max_tokens` floor; re-test after oMLX
 upgrades.
+
+### Tool-call fidelity A/B (2026-07-20, oMLX 0.4.4) — thinking-off ratified
+
+The pass-through probe above verified token suppression only on a trivial
+prompt; #44 gated actually *using* it on tool-bearing turns on whether
+suppression costs tool-call accuracy (the GLM-4.7-Flash model card recommends
+preserved thinking for tool-calling benchmarks, so parity was not assumable).
+The A/B: 12 agentic scenarios — 5-tool `tools` array attached, two
+~15K-prompt-token long-context cases, two no-tool controls — 3 reps per
+scenario per arm, single-stream, direct `/v1/chat/completions`, `max_tokens
+1024`. Harness + raw results: [`probes/thinking-ab/`](../probes/thinking-ab/).
+
+| Arm | Correct tool+args | Well-formed | Mean latency | Mean completion tok |
+| --- | --- | --- | --- | --- |
+| thinking ON | 27/36 | 36/36 | 1,849 ms | 97 |
+| thinking OFF | **29/36** | 36/36 | **626 ms** | **21** |
+
+**Reading.** No accuracy regression — thinking-off scored marginally higher.
+The two scenarios failing in both arms failed identically (the model called
+`read` first — a defensible agentic first step that strict single-turn scoring
+marks wrong; a harness artifact, not an arm difference). The only
+arm-differentiated scenario favored thinking-off (3/3 vs 0/3). The no-tool
+controls held in both arms — no spurious tool calls. Latency matched the
+prediction: ~3× single-stream, with the long-context no-tool case collapsing
+from 5.3 s / 208 tok to 0.9 s / 2 tok.
+
+**Decision (ratified 2026-08-15, closing #44).** Suppression is enabled
+client-side for tool-bearing turns via the pi_config `payload-tuner`
+extension (psmfd/pi_config#769, PR #771, its ADR-0106), which injects
+`chat_template_kwargs: {"enable_thinking": false}` in
+`before_provider_request` and was separately verified not to churn the oMLX
+prefix cache. It has run live on this host since 2026-07-20 with no observed
+tool-call misfires. Known caveats accepted with the ratification: 12
+scenarios, not the (unrecoverable) 58-scenario ADR-010 battery; single-turn
+scoring; no concurrent-load leg. The `max_tokens ≥ 200` floor stays as
+belt-and-suspenders. Re-run the A/B after any model or quant change.
 
 ## 3. Sustained-concurrency probe (the Mark under continuous load)
 

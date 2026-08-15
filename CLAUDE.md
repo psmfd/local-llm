@@ -230,6 +230,9 @@ best-current-model review.
   (never Mac-unreachable), GLM-4.7-Flash disqualified on gfx1100 —
   Qwen3-Coder-30B-A3B Q4 is the overflow model. Assessment only; the decision
   record would be a new ADR amending 009.
+- `probes/thinking-ab/` — committed harness + raw results behind the probe-2
+  thinking-suppression ratification (#44): `enable_thinking` on/off tool-call
+  fidelity A/B against a running server. Re-run after any model or quant change.
 - `README.md` — the public-facing quickstart (clone → run → validate → connect).
   Keep it in sync when flags, model IDs, or the step order change.
 
