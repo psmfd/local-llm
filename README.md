@@ -60,7 +60,7 @@ After a reboot or login, run `omlxctl start` to bring the server back.
 
 ## Validating
 
-`./setup-omlx-m5.sh --validate` runs five checks against the running server: model listing (including a warning if a retired ADR-006 tier is still pinned), a small chat completion, a **tool-calling** round-trip, a **2-way concurrency probe** (confirms the batched engine handles the fan-out), and an Anthropic-style `/v1/messages` call. Before trusting the config under real load, also run the one-time on-host probes in [docs/workhorse-probes.md](docs/workhorse-probes.md) (long-context MLA check, `enable_thinking` pass-through).
+`./setup-omlx-m5.sh --validate` runs six checks against the running server: model listing (including a warning if a retired ADR-006 tier is still pinned), a small chat completion, a **tool-calling** round-trip, a **2-way concurrency probe** (confirms the batched engine handles the fan-out), an Anthropic-style `/v1/messages` call, and an **effective cache-mode check** (the `hot_cache=` field in the server's cache-manager startup line — absent means the RAM tier is silently off, the incident class endpoint checks can't see). Before trusting the config under real load, also run the one-time on-host probes in [docs/workhorse-probes.md](docs/workhorse-probes.md) (long-context MLA check, `enable_thinking` pass-through).
 
 ## Connecting clients
 

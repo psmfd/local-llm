@@ -51,7 +51,7 @@ The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user)
 ./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service + omlxctl (no model download; server NOT started)
 ./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~24 GB) via hf
 ./setup-omlx-m5.sh --configure-pi   # register the oMLX provider with the Pi coding agent (~/.pi/agent/models.json)
-./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency) against a running server
+./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency / effective cache mode) against a running server
 ./setup-omlx-m5.sh --verbose --help
 ```
 
@@ -275,7 +275,7 @@ error — the first place to look when "why wasn't the LaunchAgent installed."
 ## Endpoint validation
 
 After the server is up, validate against `http://localhost:8000/v1` (the script's
-`--validate` mode runs all five):
+`--validate` mode runs all six):
 
 1. `GET /v1/models` with the API key.
 2. A small `/v1/chat/completions` call.
@@ -284,6 +284,14 @@ After the server is up, validate against `http://localhost:8000/v1` (the script'
 4. A **2-way concurrency probe** (two parallel completions) — a general health
    check that the batched LLM engine handles the fan-out this project serves.
 5. A `POST /v1/messages` call confirming the Anthropic-style endpoint is reachable.
+6. An **effective cache-mode check**: the running instance's
+   `PagedSSDCacheManager initialized:` log line must carry `hot_cache=` —
+   absent means the RAM tier is silently off (the 2026-07-11 #42 incident
+   signature; the `paged SSD-only mode` scheduler line appears in healthy runs
+   too and is NOT diagnostic). Setup's `converge_settings` step repairs
+   persisted `settings.json` drift against the wrapper flags (server stopped);
+   `apply_pins` additionally unpins any STRAY pin outside the tier lineup
+   (#43, sole-resident invariant), warning loudly by name.
 
 Anthropic-style clients use `/v1/messages`. The downstream consumer is an
 `IInferenceBackend` / `FallbackInferenceRouter`: fast/balanced roles →
