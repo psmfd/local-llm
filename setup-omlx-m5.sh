@@ -23,9 +23,10 @@
 #                      otherwise renders ~/.omlx/pi-provider-snippet.json and
 #                      prints manual merge steps. No secret is written.
 #   --validate         Run endpoint checks against a running server (models,
-#                      chat completion, tool-calling, Anthropic endpoint, and
-#                      a 2-way concurrency probe) and exit. When combined
-#                      with setup flags, validation runs by itself.
+#                      chat completion, tool-calling, Anthropic endpoint, a
+#                      2-way concurrency probe, and the effective cache-mode
+#                      check) and exit. When combined with setup flags,
+#                      validation runs by itself.
 #   --verbose          Print verbose detail lines.
 #   -h, --help         Show this help and exit.
 #
@@ -797,11 +798,13 @@ PYEOF
 }
 
 # Idempotency gate: returns 0 only when the host is fully converged on ADR-009 —
-# the workhorse has its alias + pin in model_settings.json AND no retired
-# ADR-006 tier is still pinned (absent-or-clean). An upgraded host with a
-# retired tier still pinned is NOT converged, so the unpin pass runs; a
-# converged host skips the whole start/pin/stop cycle (no server churn).
-# We only READ the oMLX-owned file here.
+# the workhorse has its alias + pin in model_settings.json, no retired
+# ADR-006 tier is still pinned (absent-or-clean), AND no model outside
+# TIER_MODELS holds a pin (the sole-resident invariant, #43: a stray pin from
+# an admin-panel experiment or an incident rollback would double-dip weights
+# into the memory guard). An upgraded host with a retired tier still pinned is
+# NOT converged, so the unpin pass runs; a converged host skips the whole
+# start/pin/stop cycle (no server churn). We only READ the oMLX-owned file here.
 pins_converged() {
     [ -f "$OMLX_HOME/model_settings.json" ] || return 1
     if ! python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null
@@ -810,10 +813,18 @@ try:
     models = json.load(open(sys.argv[1])).get("models", {})
 except Exception:
     sys.exit(1)
+pinned_tiers = set()
 for t in sys.argv[2:]:
     repo, alias, pin = t.split("|")
-    m = models.get(os.path.basename(repo))
+    mid = os.path.basename(repo)
+    if pin == "true":
+        pinned_tiers.add(mid)
+    m = models.get(mid)
     if not m or m.get("model_alias") != alias or bool(m.get("is_pinned")) != (pin == "true"):
+        sys.exit(1)
+# Sole-resident invariant: any pin outside the tier lineup is a stray (#43).
+for mid, m in models.items():
+    if bool(m.get("is_pinned")) and mid not in pinned_tiers:
         sys.exit(1)
 sys.exit(0)
 PYEOF
@@ -825,6 +836,31 @@ PYEOF
         [ "$(retired_model_state "$(tier_repo "$r")")" = "dirty" ] && return 1
     done
     return 0
+}
+
+# stray_pins — prints one "model_id|alias" line per model pinned in
+# model_settings.json that is not a TIER_MODELS pin. Shared source of truth for
+# pins_converged (gate, via the equivalent inline check) and apply_pins
+# (action). Retired tiers never appear here when already handled — the unpin
+# pass runs first — but if one is still pinned it IS listed, harmlessly: the
+# stray unpin PUT is idempotent with the retired unpin PUT.
+stray_pins() {
+    [ -f "$OMLX_HOME/model_settings.json" ] || return 0
+    python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+try:
+    models = json.load(open(sys.argv[1])).get("models", {})
+except Exception:
+    sys.exit(0)
+pinned_tiers = set()
+for t in sys.argv[2:]:
+    repo, alias, pin = t.split("|")
+    if pin == "true":
+        pinned_tiers.add(os.path.basename(repo))
+for mid, m in models.items():
+    if bool(m.get("is_pinned")) and mid not in pinned_tiers:
+        print(f"{mid}|{m.get('model_alias') or ''}")
+PYEOF
 }
 
 # --- Pin/alias via the oMLX admin API (ADR-009) -----------------------------
@@ -984,6 +1020,32 @@ apply_pins() {
             record_warn "pin-${alias}" "admin PUT failed for ${mid} — set alias/pin manually at ${base}/admin"
         fi
     done
+    # Stray pins LAST (#43): unpin anything still pinned outside the tier
+    # lineup, preserving its alias so a deliberate experiment is recognizable —
+    # and warn LOUDLY naming each stray, so a reverted experiment is visible
+    # rather than silent. ttl_seconds bounds any accidental load of the
+    # now-unpinned model. The escape hatch for a deliberate off-lineup pin is
+    # doing it after setup (and accepting the next run reverts it), or landing
+    # an ADR first — the sole-resident invariant (ADR-009/ADR-010) wins here.
+    local smid salias
+    while IFS='|' read -r smid salias; do
+        [ -n "$smid" ] || continue
+        # salias comes from model_settings.json (operator/admin-panel state,
+        # not a script constant). Only interpolate it into the JSON body when
+        # it is a safe charset; otherwise omit the field — the PUT merges, so
+        # the existing alias is left untouched either way.
+        case "$salias" in
+            (*[!A-Za-z0-9._-]*|"") body="{\"is_pinned\":false,\"ttl_seconds\":900}" ;;
+            (*) body="{\"model_alias\":\"${salias}\",\"is_pinned\":false,\"ttl_seconds\":900}" ;;
+        esac
+        if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
+            -d "$body" "${base}${admin}/models/${smid}/settings" >/dev/null 2>&1; then
+            record_warn "stray-pin" "unpinned STRAY pin on ${smid} (alias '${salias:-none}' kept) — it was outside the ADR-009 lineup; if this was a deliberate experiment, re-pin after setup or land an ADR"
+        else
+            record_warn "stray-pin" "stray pin on ${smid} could not be unpinned via admin PUT — unpin it manually at ${base}/admin (sole-resident invariant, ADR-009)"
+        fi
+    done <<< "$(stray_pins)"
+
     if ! $workhorse_present; then
         record_warn "pin" "workhorse model not on disk — download it with --download-model, then re-run to pin it (any retired-tier memory was still freed this run)"
     fi
@@ -997,6 +1059,131 @@ apply_pins() {
         fi
     else
         ok "pin" "pins applied against the already-running server (left running)"
+    fi
+}
+
+# --- Settings convergence (#42) ---------------------------------------------
+# oMLX persists its effective config to ~/.omlx/settings.json. On 0.4.4 the
+# persisted values SILENTLY WON over the start wrapper's CLI flags (the
+# 2026-07-11 hot_cache_max_size=0 incident: a whole agent session ran with the
+# RAM cache tier off). Measured on 0.5.7 (2026-08-15): the precedence is fixed
+# upstream — CLI flags win and the file is re-persisted from the effective
+# config at each wrapper start — so this gate is REGRESSION INSURANCE plus
+# coverage for the window where an admin-panel edit or manual `omlx serve` run
+# persisted drift and the wrapper has not started since. The wrapper is the
+# single source of truth: expected values are parsed from the INSTALLED
+# wrapper at runtime, never duplicated here.
+#
+# wrapper_flag FLAG — prints the value following FLAG in the installed start
+# wrapper, or nothing if the wrapper or flag is absent.
+wrapper_flag() {
+    local wrapper="$BIN_DIR/omlx-start-wrapper.sh"
+    [ -r "$wrapper" ] || return 0
+    sed -n "s/^[[:space:]]*$1[[:space:]]\{1,\}\([^\\ ]*\).*/\1/p" "$wrapper" | head -1 | tr -d '"'
+}
+
+# settings_converged HOT SSD GUARD CONC — returns 0 when every drift-prone key
+# in settings.json is absent/null or equal to the wrapper value. Key paths are
+# the oMLX 0.5.7 schema (nested sections); the 0.4.4-era flat/cache shape is
+# gone from current files, and an unreadable/absent file counts as converged
+# (first-ever start writes it from the CLI flags).
+settings_converged() {
+    [ -f "$OMLX_HOME/settings.json" ] || return 0
+    python3 - "$OMLX_HOME/settings.json" "$1" "$2" "$3" "$4" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)  # unreadable — nothing to converge; first start rewrites it
+hot, ssd, guard, conc = sys.argv[2:6]
+def get(path):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+def size_drift(actual, expected):
+    return expected and actual is not None and str(actual).upper() != expected.upper()
+def num_drift(actual, expected):
+    try:
+        return expected and actual is not None and float(actual) != float(expected)
+    except (TypeError, ValueError):
+        return True
+drift = []
+if size_drift(get(("cache", "hot_cache_max_size")), hot):
+    drift.append(f"cache.hot_cache_max_size={get(('cache','hot_cache_max_size'))} (wrapper: {hot})")
+if size_drift(get(("cache", "ssd_cache_max_size")), ssd):
+    drift.append(f"cache.ssd_cache_max_size={get(('cache','ssd_cache_max_size'))} (wrapper: {ssd})")
+if num_drift(get(("memory", "memory_guard_custom_ceiling_gb")), guard):
+    drift.append(f"memory.memory_guard_custom_ceiling_gb={get(('memory','memory_guard_custom_ceiling_gb'))} (wrapper: {guard})")
+if num_drift(get(("scheduler", "max_concurrent_requests")), conc):
+    drift.append(f"scheduler.max_concurrent_requests={get(('scheduler','max_concurrent_requests'))} (wrapper: {conc})")
+if drift:
+    print("; ".join(drift))
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+}
+
+# converge_settings — the setup step. Detects drift and repairs it with the
+# server STOPPED (a running server rewrites the file from its in-memory state,
+# so an edit under it is lost). Repair writes the wrapper values — exactly
+# what oMLX itself re-persists at the next wrapper start — never null (the
+# nested 0.5.7 schema is not verified to accept nulls).
+converge_settings() {
+    if [ ! -f "$OMLX_HOME/settings.json" ]; then
+        skip "settings" "no settings.json yet — first server start writes it from the wrapper flags"
+        return
+    fi
+    # Guard every assignment: under set -euo pipefail a failing command
+    # substitution aborts the script, and this step must never hard-fail (#42).
+    local hot ssd guard conc
+    hot="$(wrapper_flag --hot-cache-max-size)" || hot=""
+    ssd="$(wrapper_flag --paged-ssd-cache-max-size)" || ssd=""
+    guard="$(wrapper_flag --memory-guard-gb)" || guard=""
+    conc="$(wrapper_flag --max-concurrent-requests)" || conc=""
+    if [ -z "$hot$ssd$guard$conc" ]; then
+        skip "settings" "installed start wrapper not found/parseable — nothing to converge against"
+        return
+    fi
+    # A PARTIAL parse failure must be loud, not silently skip that one key:
+    # an empty expected value disables drift detection for that field only.
+    local flagname val
+    for flagname in "--hot-cache-max-size:$hot" "--paged-ssd-cache-max-size:$ssd" \
+                    "--memory-guard-gb:$guard" "--max-concurrent-requests:$conc"; do
+        val="${flagname#*:}"
+        [ -z "$val" ] && record_warn "settings" "could not parse ${flagname%%:*} from the installed wrapper — drift detection for that key is OFF this run"
+    done
+    local drift
+    if drift="$(settings_converged "$hot" "$ssd" "$guard" "$conc")"; then
+        ok "settings" "settings.json matches the wrapper flags (hot ${hot}, ssd ${ssd}, guard ${guard} GB, concurrency ${conc})"
+        return
+    fi
+    record_warn "settings" "settings.json drift found: ${drift}"
+    # TOCTOU note: a server starting between this health probe and the write
+    # below could race the repair — accepted on this single-operator host
+    # (same accepted window as apply_pins's already-running-server handling).
+    if curl -fsS --max-time 3 "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+        record_warn "settings" "server is running — a live server rewrites settings.json; stop it (omlxctl stop) and re-run setup to repair"
+        return
+    fi
+    if python3 - "$OMLX_HOME/settings.json" "$hot" "$ssd" "$guard" "$conc" <<'PYEOF' 2>/dev/null
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+hot, ssd, guard, conc = sys.argv[2:6]
+d.setdefault("cache", {})["hot_cache_max_size"] = hot
+d["cache"]["ssd_cache_max_size"] = ssd
+d.setdefault("memory", {})["memory_guard_custom_ceiling_gb"] = float(guard)
+d.setdefault("scheduler", {})["max_concurrent_requests"] = int(conc)
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+    then
+        chmod 600 "$OMLX_HOME/settings.json" 2>/dev/null || true
+        ok "settings" "drifted keys repaired to the wrapper values (server was stopped)"
+    else
+        record_warn "settings" "automatic repair failed — edit ${OMLX_HOME}/settings.json manually with the server stopped (cache.hot_cache_max_size=${hot}, cache.ssd_cache_max_size=${ssd}, memory.memory_guard_custom_ceiling_gb=${guard}, scheduler.max_concurrent_requests=${conc})"
     fi
 }
 
@@ -1090,6 +1277,30 @@ validate_endpoint() {
     else
         record_warn "validate-messages" "POST /v1/messages failed — Anthropic-style clients need this; confirm the endpoint and whether an 'anthropic-version' header is required"
     fi
+
+    # 6. effective cache mode (#42). Endpoint checks cannot see cache config —
+    # the 2026-07-11 hot_cache=0 incident passed every check above while all
+    # prefix-cache traffic went to the SSD tier. The discriminator is the
+    # hot_cache= field in the running instance's "PagedSSDCacheManager
+    # initialized:" startup line: absent means the RAM tier is OFF. (The
+    # "paged SSD-only mode" scheduler line appears in healthy runs too and is
+    # NOT diagnostic.)
+    # Search ALL log files, not the newest by mtime: launchd's out/err logs are
+    # two fixed append-only files, and stderr traffic after startup can make
+    # the err log "newest" while the banner lives in the out log. Lines carry a
+    # sortable timestamp prefix, so sort|tail yields the latest banner across
+    # files. Every assignment is ||-guarded: a no-match grep (exit 1) is our
+    # anticipated skip path, and pipefail would otherwise abort the script.
+    local cache_line
+    cache_line="$(grep -h 'PagedSSDCacheManager initialized' "$LOG_DIR"/*.log 2>/dev/null | sort | tail -1)" || cache_line=""
+    if [ -z "$cache_line" ]; then
+        skip "validate-cache" "no 'PagedSSDCacheManager initialized' line in $LOG_DIR/*.log — cannot verify effective cache mode"
+    elif echo "$cache_line" | grep -q 'hot_cache='; then
+        ok "validate-cache" "RAM hot-cache tier is ON ($(echo "$cache_line" | grep -o 'hot_cache=[^,]*' || true))"
+        detail "$cache_line"
+    else
+        record_warn "validate-cache" "RAM hot-cache tier is OFF — 'hot_cache=' missing from the cache-manager startup line (the #42 incident signature); stop the server, re-run setup (settings convergence), then restart"
+    fi
 }
 
 # --- Summary ----------------------------------------------------------------
@@ -1129,6 +1340,7 @@ main() {
         skip "pi-config" "Pi provider registration is opt-in — re-run with --configure-pi"
     fi
     apply_pins
+    converge_settings
 
     info "The server is installed but NOT running (startup is intentional)."
     info "Start it on demand:  omlxctl start    (stop: omlxctl stop, status: omlxctl status)"
