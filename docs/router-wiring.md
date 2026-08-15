@@ -252,13 +252,28 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
   measured at ~16K contexts, but real 25–45K agentic streams oversubscribe the
   ~83K-token shared KV pool ~3× — 2026-07-26 incident; at 4, matching the pi
   subagent spawn cap, excess requests queue at admission and consume no KV).
-  **Saturation surfaces as HTTP `400`, not 429/503**: when the memory guard's
-  preflight rejects, the body carries
-  `"oMLX prefill memory guard rejected this prompt"`. The router MUST treat that
-  specific 400 as a **capacity signal** — retry with backoff or trip the circuit
-  breaker and divert to the cloud frontier — never as a permanent client error
-  (a generic 400 without that marker remains a real client error). A 429 or a
-  memory-guard 500 still trips the breaker as before.
+  **Saturation surfaces as HTTP `400`, not 429/503.** On oMLX 0.5.7 an
+  over-boundary prompt is rejected **pre-compute**: a new preflight path
+  returns the 400 instantly (`wall=0 s`), and the body carries a new
+  machine-readable `code: "prefill_memory_exceeded"` alongside the existing
+  detection string `"oMLX prefill memory guard rejected this prompt"`.
+  **Router detection should key on the `code` field first, the body-text
+  string second** (the second remains useful against a body that carries the
+  string without the code). Also keep the **HTTP-200 keepalive-JSON check as
+  a defensive fallback** — the documented 0.5.3 behavior was a stall followed
+  by an HTTP `200` whose body omits a `usage` field, with that absence as the
+  secondary tell; the 0.5.7 re-baseline did not observe this shape for the
+  single-stream case (the preflight 400 superseded it there), but it left
+  open whether a post-admission mid-flight reject can still surface this way
+  under concurrent load. The router MUST treat any of these signals as a
+  **capacity signal** — retry with backoff or trip the circuit breaker and
+  divert to the cloud frontier — never as a permanent client error (a generic
+  400 without either marker remains a real client error). A 429 or a
+  memory-guard 500 still trips the breaker as before. **Parse response bodies
+  leniently:** successful large responses can arrive with ~30 bytes of
+  leading whitespace before the JSON body (an artifact of oMLX's
+  `_with_json_keepalive`, jundot/omlx#2066) — use a whitespace-tolerant JSON
+  parser, not one that rejects leading bytes.
 - **max_tokens.** GLM-4.7-Flash emits a **reasoning preamble before tool calls**;
   set `InferenceRequest.MaxTokens` ≥ ~200 on tool-bearing requests so the call is
   not truncated, and keep `AttemptTimeout` generous (no cold-load tier anymore,

@@ -45,6 +45,27 @@ deliberately avoid.
 > multi-minute stall, not the 0.4.4 instant 400 — router/pi handling tracked
 > in #58. The 0.5.1 SSD-cache re-keying invalidated the on-disk prefix cache
 > once (4,974 blocks / 65.77 GB skipped at first scan) — expected, one-time.
+>
+> **0.5.7 re-baseline: 2026-08-15, oMLX 0.5.7 (MLX 0.32.0), macOS 26.5.2 — all
+> gates PASS.** Stage 1 inline gauntlet for the 0.5.3 → 0.5.7 upgrade (see
+> `.session-notes/057-rebaseline/results.md`). Highlights: probe 4 within
+> noise at 56.7 TFLOPS fp16 / 57.3 bf16 (0.5.3: 57.4/57.3); sustained mark-4
+> wave ran **16/16 clean** at a heavier ~35K-token shape; fresh-idle
+> acceptance rose to **≥91K tokens**, with a 167,473-token prompt now
+> rejected **instantly (HTTP 400) at a new preflight stage** carrying a
+> machine-readable `code: "prefill_memory_exceeded"` — the #58
+> stall-then-200 contract is fixed **for the single-stream case** (whether a
+> post-admission mid-flight reject survives under concurrent load stays open;
+> the re-baseline waves never triggered the guard concurrently — see the
+> router-wiring saturation section). Guard estimator slope dropped to
+> **~0.36 GB/1K** (was 0.44); idle dynamic ceiling **73.26 GB**. Hot-cache
+> boundary **≥69.9K** (0.5.3 could only flag ~45K — first time verified
+> against the ADR-011 gate). The mark-8 oversubscription diagnostic came
+> back **clean** — spiral not reproducible, one hard-pressure idle reclaim
+> recovered in a single pass — **#29 disposition: close with evidence**. A
+> one-time SSD-cache partial invalidation at first start (831/3,872 blocks
+> skipped) was expected. See the probe-2 "0.5.7 smoke" note and the probe-3
+> "0.5.7 re-baseline" subsection.
 
 Prereqs: server provisioned, `omlxctl start` done, `KEY="$(cat ~/.omlx/api-key)"`.
 
@@ -147,6 +168,11 @@ tool-call misfires. Known caveats accepted with the ratification: 12
 scenarios, not the (unrecoverable) 58-scenario ADR-010 battery; single-turn
 scoring; no concurrent-load leg. The `max_tokens ≥ 200` floor stays as
 belt-and-suspenders. Re-run the A/B after any model or quant change.
+
+**0.5.7 smoke (2026-08-15).** `enable_thinking:false` suppression
+re-verified on oMLX 0.5.7 — 1 completion token on all isolation runs during
+the 0.5.3 → 0.5.7 re-baseline gauntlet
+(`.session-notes/057-rebaseline/results.md`).
 
 ## 3. Sustained-concurrency probe (the Mark under continuous load)
 
@@ -265,6 +291,83 @@ boundary (was ~91% of the old) and the wall-time cliff (264 s at 81K) still
 argues against inviting larger contexts; mark 4 ran the incident shape clean.
 ADR-011/012 stand re-affirmed with wider margin — no amendment needed.
 
+### 0.5.7 re-baseline (2026-08-15, mark 4, MLX 0.32.0, macOS 26.5.2)
+
+Post-upgrade re-run for the 0.5.3 → 0.5.7 gauntlet
+(`.session-notes/057-rebaseline/results.md`).
+
+**Sustained wave (mark 4).** 2 waves × 8 concurrent unique cold streams,
+tokenized to **33.4–37.9K tokens each** (~25% heavier than 0.5.3's 28.3K
+shape), `max_tokens 200`, thinking suppressed:
+
+| Wave | Streams | Outcome | Wall time |
+| --- | --- | --- | --- |
+| 1 | 8/8 | HTTP 200 | 498 s |
+| 2 | 8/8 | HTTP 200 | 510 s |
+
+**16/16 HTTP 200, zero guard events** (all guard-matching log lines were
+restart banners plus the intentional 150K probe) — no cross-wave
+degradation, no eviction spiral. RSS spot-peak 43.4 GB (KV largely lives
+outside RSS; treat as a floor, not a footprint). Per-stream decode during
+concurrent prefill still collapses to ~1 tok/s implied — same as 0.5.3; #45
+stays live.
+
+**Prefill ladder (fresh-idle, fresh restart, single stream, unique
+cache-busting payloads).** Rungs 16K→96K:
+
+| Rung (actual prompt tok) | HTTP | Wall | Prefill rate |
+| --- | --- | --- | --- |
+| 14,431 | 200 | 10 s | ~1,443 tok/s |
+| 31,218 | 200 | 39 s | ~800 tok/s |
+| 45,496 | 200 | 78 s | ~583 tok/s |
+| 63,155 | 200 | 146 s | ~433 tok/s |
+| 75,979 | client abort @1,029 s | — | ~46 tok/s (crawl) |
+
+Gate read: **≥91K fresh-idle acceptance** (0.5.3: ~98K; threshold ≥85K) →
+ADR-011 boundary gate PASSING pending the reject-rung measurement. Prefill
+rate declines smoothly with size (1,443→295 tok/s), no cliff. See the
+"Sequential-ladder crawl" note below for the 75,979-token rung's anomaly and
+its isolation runs.
+
+**Derived constants (0.5.7), vs 0.5.3:**
+
+- Guard dynamic ceiling at idle: **73.26 GB** (0.5.3: 73.08 GB — unchanged).
+- Guard estimator slope: **~0.36 GB/1K tokens** (0.5.3: ~0.44 — #2434 fix
+  visible).
+- Implied fresh-idle acceptance ceiling: **~135K tokens** (measured
+  accepted: 91K; measured rejected: 167K — exact edge not bisected, not
+  needed for the gate).
+
+**Mark-8 oversubscription diagnostic (temp manual instance, identical flags,
+`--max-concurrent-requests 8`): CLEAN — spiral not reproducible on 0.5.7.**
+8 concurrent unique ~34.5–37.9K cold streams, all admitted simultaneously:
+**8/8 HTTP 200 in 495 s total, zero rejects, zero evictions.** One
+hard-pressure event mid-wave ("Hard memory pressure, no evictable models and
+no loads in progress: requested idle reclaim") recovered cleanly in a
+single pass — the 0.5.4 #2342 buffer-drain fix visibly working where 0.4.4
+produced the ADR-010 reject-storm/evict spiral. **#29 disposition: close
+with evidence** (mechanism not reproducible on 0.5.7; upstream fixed the
+adjacent enforcer family in #2059/#2581/#2342). ADR-012's mark 4 remains the
+right operating point — mark-8 completions were all-or-nothing at ~495 s vs
+mark 4's staggered 296–510 s.
+
+**Operational caveat.** During 8-way concurrent prefill the server logs
+nothing and RSS stays flat (~23 GB) for ~8 min while `/health` and
+`/v1/models` stay responsive throughout — easily mistaken for the upstream
+#2624 wedge. `omlxctl status` cannot distinguish "prefilling hard" from
+"wedged" — monitoring gap worth a note.
+
+**Sequential-ladder crawl (watch-item).** During the fresh-idle prefill
+ladder, the 5th consecutive large unique prefill (75,979 tokens) crawled to
+~46 tok/s once (client abort at 1,029 s; server log: `Prefill interrupted at
+47104/75979 tokens`, no guard/throttle lines — silent slowness). Isolation
+runs after a fresh restart exonerated size and single-prior-write
+contention as causes (66,382 tok clean-idle: 200 in 159 s, ~418 tok/s;
+91,423 tok immediately after with no restart: 200 in 310 s, ~295 tok/s),
+pointing to a cumulative multi-rung effect (4+ back-to-back large unique
+prefills) consistent with the upstream #2624/#2647 SSD boundary-snapshot
+stall family. It did **not** recur under the mark-4 wave shape above.
+
 ## 4. M5 Neural Accelerator engagement probe
 
 **Why.** MLX exploits the M5 GPU's Neural Accelerators (dedicated matmul units;
@@ -324,6 +427,11 @@ change did not move the M5 Max GEMM baseline (2026-07-05 on 0.4.4 / MLX
 0.31.2: 57.0 / 57.1). Re-run after any oMLX upgrade (the bundled MLX can
 move) and after any macOS update (see also the macOS-27 hold:
 jundot/omlx#1835).
+
+**Last run (2026-08-15, oMLX 0.5.7 brew keg, MLX 0.32.0, macOS 26.5.2):**
+56.7 TFLOPS fp16 / 57.3 TFLOPS bf16 vs the 0.5.3 baseline 57.4/57.3 — within
+noise; Neural Accelerators engaged — PASS
+(`.session-notes/057-rebaseline/results.md`).
 
 Note the outcome (date, oMLX version, pass/fail, measured numbers) in the PR or
 issue that prompted the re-run. If probe 1 fails, that is grounds to revisit

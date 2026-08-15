@@ -24,7 +24,7 @@ permissions:
 
 env:
   GH_TOKEN: ${{ github.token }}
-  KNOWN_STABLE: "0.5.3"
+  KNOWN_STABLE: "0.5.7"
   WATCHED_ISSUE: "1835"
 
 jobs:
