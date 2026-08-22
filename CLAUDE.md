@@ -233,6 +233,14 @@ best-current-model review.
   (never Mac-unreachable), GLM-4.7-Flash disqualified on gfx1100 —
   Qwen3-Coder-30B-A3B Q4 is the overflow model. Assessment only; the decision
   record would be a new ADR amending 009.
+- `docs/kv-cache-placement-research.md` — research note answering "can KV cache
+  live elsewhere?" for both hosts (2026-08): active KV is placement-bound to the
+  serving host (physics); cross-host KV transfer stays a dead end at every layer
+  (oMLX has no connector, ROCm KV tooling is CDNA-only, no cross-engine KV
+  format exists); the real levers are within-host — hot-cache ↔ guard
+  rebalancing and SSD-tier sizing on the Mac, CPU KV offload for the AMD box's
+  own overflow lane — each gated on a listed on-host probe. Assessment only;
+  carries two scope refinements to the AMD augmentation note.
 - `probes/thinking-ab/` — committed harness + raw results behind the probe-2
   thinking-suppression ratification (#44): `enable_thinking` on/off tool-call
   fidelity A/B against a running server. Re-run after any model or quant change.
