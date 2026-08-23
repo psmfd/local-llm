@@ -178,8 +178,11 @@ levers exist when the box is built:
   inspection shows no CUDA-only gating, but **no published ROCm validation
   exists anywhere — this box would be the validation** — and the connector is
   young (a block-indexing crash at ~565+ concurrent prompts, far beyond this
-  lane's 4–8). `--swap-space` is the older, better-worn CPU-staging tool for
-  preemption bursts. Smoke both at bring-up (probe A1).
+  lane's 4–8). ~~`--swap-space` is the older, better-worn CPU-staging tool for
+  preemption bursts~~ — **corrected 2026-08-23**: `--swap-space` is
+  non-functional in vLLM V1 (`num_cpu_blocks` hardcoded to zero,
+  vllm-project/vllm#27984; V1 preempts by recompute) — drop it from any flag
+  set. Smoke the connector at bring-up (probe A1).
 - **FP8 KV on gfx1100 is a refinement, not a flat no** (updates the
   carried-forward "bf16-only" fact): vLLM #13147 shows `fp8` KV **crashes
   specifically in combination with prefix caching** on gfx1100 — Triton there
@@ -223,14 +226,39 @@ Mac (any time):
 
 AMD (at overflow-lane bring-up, on the pinned image):
 
-1. **A1 — offload smoke:** `OffloadingConnector` and `--swap-space` under the
-   lane's real 4–8-stream shape; nobody has published a ROCm result.
+1. **A1 — offload smoke:** `OffloadingConnector` under the lane's real
+   request shape; nobody has published a ROCm result. (`--swap-space` removed
+   from this probe — non-functional in vLLM V1, vllm-project/vllm#27984.)
 2. **A2 — `fp8_e5m2` + APC probe:** explicit-dtype attempt against the
    #13147 crash; minutes to run, updates the bf16-only assumption if it
    passes.
 3. **A3 — admission guardrail sizing:** measure the real KV pool and set the
    lane's `--max-num-seqs`/admission cap from it before any large-context
    traffic is routed.
+
+## Verification updates (2026-08-23)
+
+A follow-up first-party verification pass (provisioning prep) landed four
+corrections affecting this note and the carried-forward facts in
+[amd-augmentation-research.md](amd-augmentation-research.md); recorded here
+rather than by editing that dated note:
+
+- **`--swap-space` is dead in vLLM V1** (see the corrected bullet and probe
+  A1 above) — vllm-project/vllm#27984.
+- **AOTriton's gfx1100 tier reportedly moved again**: 0.12b (~2026-07)
+  promoted gfx1100 to *stable* (single-source). The carried
+  `VLLM_USE_TRITON_FLASH_ATTN=0` default is now an A/B item on the pinned
+  image, not a settled pin.
+- **vLLM's saturation gap is worse than the note's caveat**: there is *no*
+  status-code signal at all — the waiting queue is an unbounded FIFO; RFC
+  vllm-project/vllm#18826 (queue cap + 503) and both PRs remain open. A
+  router adapter needs its own client-side busy detection
+  (`vllm:num_requests_waiting` is the metrics-side signal). `/health` is
+  liveness-only (#36960) — readiness needs a synthetic completion.
+- **ROCm 7.2.1 is no longer current production** (six-week cadence; 7.14
+  current), but for a digest-pinned *container* deployment the container
+  bundles its own ROCm userspace — the host needs a compatible kernel/KFD
+  ABI for the *image's* bundled ROCm, not a host ROCm upgrade.
 
 ## Status and next step
 
