@@ -245,14 +245,18 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
 - **Role routing.** `Fast` / `Balanced` → **Mac oMLX workhorse** primary → cloud
   fallback. `Quality` → oMLX throws `InferenceUnavailableException` (no local
   quality tier — the alias dictionary omits the role) → **cloud frontier**.
-- **Saturation.** oMLX runs at `--max-concurrent-requests 4` (**the
-  large-context mark**,
-  [ADR-012](../adrs/012-concurrency-mark-4-large-context.md):
-  [ADR-010](../adrs/010-6bit-workhorse-sustained-mark.md)'s mark of 8 was
-  measured at ~16K contexts, but real 25–45K agentic streams oversubscribe the
-  ~83K-token shared KV pool ~3× — 2026-07-26 incident; at 4, matching the pi
-  subagent spawn cap, excess requests queue at admission and consume no KV).
-  **Saturation surfaces as HTTP `400`, not 429/503.** On oMLX 0.5.7 an
+- **Saturation.** oMLX runs at `--max-concurrent-requests 1` (**the serial
+  mark**, [ADR-013](../adrs/013-gptoss-serial-workhorse.md), superseding
+  [ADR-012](../adrs/012-concurrency-mark-4-large-context.md)'s 4): the host
+  serves one request at a time by design; a concurrent second request queues
+  at admission and consumes no KV, so router-side concurrency limiting is
+  unnecessary — but keep router calls serial anyway to avoid queue-inflated
+  latencies. **Under the serial mark a prefill-guard rejection is never
+  contention** — it means this one request's prompt is genuinely over the
+  boundary, so the correct reaction is **compact/trim and resubmit** (or
+  divert that request to the cloud), not backoff-and-retry of the same
+  payload, which will fail identically.
+  **The rejection surfaces as HTTP `400`, not 429/503.** On oMLX 0.5.7 an
   over-boundary prompt is rejected **pre-compute**: a new preflight path
   returns the 400 instantly (`wall=0 s`), and the body carries a new
   machine-readable `code: "prefill_memory_exceeded"` alongside the existing
@@ -265,19 +269,25 @@ builder.Services.AddTransient<FallbackInferenceRouter>();
   secondary tell; the 0.5.7 re-baseline did not observe this shape for the
   single-stream case (the preflight 400 superseded it there), but it left
   open whether a post-admission mid-flight reject can still surface this way
-  under concurrent load. The router MUST treat any of these signals as a
-  **capacity signal** — retry with backoff or trip the circuit breaker and
-  divert to the cloud frontier — never as a permanent client error (a generic
-  400 without either marker remains a real client error). A 429 or a
-  memory-guard 500 still trips the breaker as before. **Parse response bodies
+  under concurrent load. The router MUST treat any of these signals as an
+  **over-boundary signal for that request** — compact/trim the prompt and
+  resubmit, or divert that request to the cloud frontier — never as a
+  permanent client error (a generic 400 without either marker remains a real
+  client error) and, under the serial mark, never as transient contention to
+  retry unchanged. A 429 or a memory-guard 500 still trips the breaker as
+  before. **Parse response bodies
   leniently:** successful large responses can arrive with ~30 bytes of
   leading whitespace before the JSON body (an artifact of oMLX's
   `_with_json_keepalive`, jundot/omlx#2066) — use a whitespace-tolerant JSON
   parser, not one that rejects leading bytes.
-- **max_tokens.** GLM-4.7-Flash emits a **reasoning preamble before tool calls**;
-  set `InferenceRequest.MaxTokens` ≥ ~200 on tool-bearing requests so the call is
-  not truncated, and keep `AttemptTimeout` generous (no cold-load tier anymore,
-  but decode + preamble still take time).
+- **max_tokens.** gpt-oss emits a **Harmony reasoning channel before answers
+  and tool calls** (default effort medium); set `InferenceRequest.MaxTokens`
+  generously on tool-bearing requests (validation uses 512) so the call is not
+  truncated mid-reasoning, and keep `AttemptTimeout` generous (no cold-load
+  tier anymore, but reasoning + decode still take time). Reasoning effort is
+  tunable per request via `chat_template_kwargs: {"reasoning_effort":
+  "low|medium|high"}` — the top-level `reasoning_effort` param is ignored by
+  oMLX 0.5.7 (ADR-013).
 
 > **Historical note.** Earlier revisions of this doc described the ADR-006
 > three-tier wiring (`coding-fast`/`coding-balanced`/`coding-quality` all local)

@@ -7,21 +7,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A provisioning project — not an application. It stands up **oMLX**
 (`jundot/omlx`) as a local, OpenAI/Anthropic-compatible inference server on an
 Apple Silicon **M5 Max (128 GB unified memory, macOS)**, tuned for a
-**parallel-agent coding workload**: an orchestrator fans out 3+ concurrent agent
-requests that share long system prefixes, so **concurrent throughput and
-prefix-cache reuse matter more than single-stream tok/s**.
+**serial workflow coding workload**: one request in flight at a time, each
+step's output feeding the next as a growing transcript, so **single-stream
+decode, prefill speed, and turn-over-turn prefix-cache reuse matter — there is
+no concurrent fan-out** (ADR-013 retired the ADR-009-era parallel premise).
 
-The current architecture: the Mac runs a **single pinned workhorse model** (one
-3B-active MoE), with a **cloud provider as the quality frontier** — decided in
+The current architecture: the Mac runs a **single pinned workhorse model**
+(gpt-oss-120b-4bit, a 5.1B-active MoE), with a **cloud provider as the quality
+frontier** — structure decided in
 [`adrs/009-mac-single-workhorse-cloud-frontier.md`](adrs/009-mac-single-workhorse-cloud-frontier.md),
-as amended by [`adrs/010-6bit-workhorse-sustained-mark.md`](adrs/010-6bit-workhorse-sustained-mark.md)
-(quant 8-bit → **6-bit**),
-[`adrs/011-pi-context-window-guard-boundary.md`](adrs/011-pi-context-window-guard-boundary.md)
-(pi-advertised contextWindow 131072 → **76800**, the measured prefill-guard
-boundary), and
-[`adrs/012-concurrency-mark-4-large-context.md`](adrs/012-concurrency-mark-4-large-context.md)
-(concurrency mark 8 → **4** and pi maxTokens 16384 → **8192** for
-large-context agentic load).
+model and serial serving shape decided in
+[`adrs/013-gptoss-serial-workhorse.md`](adrs/013-gptoss-serial-workhorse.md)
+(workhorse GLM-4.7-Flash-6bit → **gpt-oss-120b-4bit**, concurrency mark 4 →
+**1**, pi contextWindow 76800 → **122880**; evidence in
+[#73](https://github.com/psmfd/local-llm/issues/73)). The GLM-era amendments —
+[`adrs/010`](adrs/010-6bit-workhorse-sustained-mark.md) (6-bit quant),
+[`adrs/011`](adrs/011-pi-context-window-guard-boundary.md) (guard-bound
+contextWindow), [`adrs/012`](adrs/012-concurrency-mark-4-large-context.md)
+(mark 4, maxTokens 8192) — are amended by ADR-013; only the maxTokens 8192
+decision carries forward, and the GLM-6bit configuration they describe remains
+the documented primary-fallback rollback.
 
 Decision history — each ADR's `Status:` front-matter carries the supersession
 chain; consult the ADRs rather than re-deriving it:
@@ -49,7 +54,7 @@ The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user)
 
 ```bash
 ./setup-omlx-m5.sh                  # preflight + install + dirs + key + wired-limit + service + omlxctl (no model download; server NOT started)
-./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~24 GB) via hf
+./setup-omlx-m5.sh --download-model # also fetch the workhorse model (~66 GB) via hf
 ./setup-omlx-m5.sh --configure-pi   # register the oMLX provider with the Pi coding agent (~/.pi/agent/models.json)
 ./setup-omlx-m5.sh --validate       # endpoint checks (models / chat / tool-call / Anthropic / 2-way concurrency / effective cache mode) against a running server
 ./setup-omlx-m5.sh --verbose --help
@@ -57,7 +62,7 @@ The deliverable is `setup-omlx-m5.sh` (idempotent; author-side, run by the user)
 
 `--validate` short-circuits `main()`: it runs *only* the endpoint checks and
 exits — no preflight and no install steps run, even when combined with other
-flags.
+flags. (`--download-model` now fetches ~66 GB — the gpt-oss workhorse.)
 
 The server is **on-demand** (it does not start at login, and setup does not start
 it). Start/stop it intentionally with the installed `omlxctl` tool (ADR-005):
@@ -70,11 +75,11 @@ omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. The Metal
 wired-limit step needs `sudo`. The workhorse alias + pin is applied via the
 **oMLX admin API** (`apply_pins` briefly starts the server, PUTs the model's
-settings — and **unpins any retired ADR-006 tiers** it finds registered, renaming
-the 8-bit to alias `workhorse-8b` so the primary alias transfers — then stops
-it; `model_settings.json` is oMLX-owned, so the script never writes it
-directly); it degrades to printed manual admin-panel steps if the API can't be
-reached (ADR-009).
+settings — and **unpins any retired tiers** it finds registered, renaming the
+GLM-6bit to alias `workhorse-glm` (and the 8-bit to `workhorse-8b`) so the
+primary alias transfers to gpt-oss — then stops it; `model_settings.json` is
+oMLX-owned, so the script never writes it directly); it degrades to printed
+manual admin-panel steps if the API can't be reached (ADR-009/013).
 
 Preflight hard-fails with exit `2` for non-macOS, non-arm64, RAM below ~120 GB,
 free disk below ~90 GB, or missing Homebrew. M5 Max is the tuned target; a
@@ -126,45 +131,52 @@ best-current-model review.
   `$(brew --repository jundot/omlx)`, then `brew reinstall omlx`). Re-run the
   probe suite
   before trusting any future bump.
-- **Model (single workhorse, text-only; ADR-009 lineup, ADR-010 quant):**
-  **`coding-workhorse`** — `mlx-community/GLM-4.7-Flash-6bit`
-  (`Glm4MoeLiteForCausalLM`, MoE ~3B active, 202K ctx, MLA KV compression).
-  ~24 GB on disk. **Pinned, sole resident model** — one pinned model gives the
-  fan-out one shared prefix cache and never exercises oMLX's multi-model swap
-  path. A verified text-only coder build (`*ForCausalLM`, no `vision_config`)
-  and tool-call-verified on oMLX, so it routes to the batched LLM engine with
-  **no engine override**. Quality parity with the 8-bit and the measured
-  sustained-load footprint/margin are recorded in ADR-010 and
-  `docs/workhorse-probes.md` — cite those, don't restate the numbers. The
-  DFlash speculative-decoding engine's private SSD cache stays disabled
-  (`dflash_ssd_cache=false`; DFlash itself is never engaged) — the **main** SSD
-  prefix cache (`--paged-ssd-cache-dir`) stays on; its live upstream risk is
-  oMLX #702 (the memory guard tracks Metal allocations, not cache RSS).
-  **Retired models** (`GLM-4.7-Flash-8bit`, plus ADR-006's
+- **Model (single workhorse, text-only; ADR-009 structure, ADR-013 model):**
+  **`coding-workhorse`** — `mlx-community/gpt-oss-120b-4bit`
+  (`GptOssForCausalLM`, MoE 117B total / 5.1B active, native 131,072 ctx,
+  alternating sliding-window(128)/full attention, 8-head GQA — KV
+  ~0.070 GB/1K). ~66 GB on disk (61.56 GB resident measured). **Pinned, sole
+  resident model** — never exercises oMLX's multi-model swap path. A verified
+  text-only build (`*ForCausalLM`, no `vision_config`) routed to the batched
+  LLM engine with **no engine override**; Harmony tool calling verified 58/58
+  on oMLX 0.5.7, HumanEval 95.7% vs the GLM incumbent's 83.5% (McNemar
+  p=0.00018), and a 4-hour serial soak clean — all recorded in ADR-013 and
+  [#73](https://github.com/psmfd/local-llm/issues/73); cite those, don't
+  restate the numbers. The DFlash speculative-decoding engine stays disengaged
+  (`dflash_ssd_cache=false`; no DFlash draft exists for either the current or
+  the fallback workhorse — #71) — the **main** SSD prefix cache
+  (`--paged-ssd-cache-dir`) stays on; its live upstream risk is oMLX #702
+  (the memory guard tracks Metal allocations, not cache RSS). **Retired
+  models** (`GLM-4.7-Flash-6bit`, `GLM-4.7-Flash-8bit`, plus ADR-006's
   `Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` and `Qwen3-Coder-Next-MLX-4bit`) are
   never downloaded/aliased/validated; setup actively unpins them if a prior
   install left them pinned (see the `apply_pins` note under Commands). The
-  **8-bit stays on disk as the primary inactive fallback** (quality-parity-tested
-  rollback: pin swap + restart), Qwen3-Coder-30B as the secondary. GLM emits a
-  reasoning preamble — tool-bearing requests need `max_tokens ≥ ~200`
-  (validation uses 256).
+  **GLM-6bit stays on disk as the primary inactive fallback** (full ADR-009/010
+  probe history; rollback = pin swap + restore GLM-era flags + restart — and
+  restoring parallel fan-out serving requires exactly this rollback, since
+  gpt-oss's weights leave no multi-stream KV pool). gpt-oss emits a Harmony
+  reasoning channel before answers/tool calls — tool-bearing requests need
+  generous `max_tokens` (validation uses 512); reasoning effort is controlled
+  via `chat_template_kwargs: {"reasoning_effort": "low|medium|high"}` (default
+  medium — the top-level `reasoning_effort` param is **ignored** by oMLX
+  0.5.7; client delivery via pi payload-tuner, pi_config#1052).
 - **Serving flags:** `--host 127.0.0.1` (explicit loopback pin), port `8000`,
   `--memory-guard-gb 90` (replaces the removed `--max-process-memory`),
-  `--paged-ssd-cache-dir ~/.omlx/cache`, `--paged-ssd-cache-max-size 50GB` (oMLX
-  defaults the SSD tier to 100 GB — past the preflight's 90 GB free-disk budget;
-  50 GB keeps model + cache inside it with ~16 GB slack),
-  `--hot-cache-max-size 24GB` (oMLX accepts
-  both absolute sizes and percentages; we pin an absolute value ≈ 27% of the guard
-  for a deterministic footprint — one model, no second cache to fund),
-  `--max-concurrent-requests 4` (ADR-012's **large-context** mark: ADR-010's
-  mark of 8 was measured at ~16K contexts, but the KV pool holds only ~83K
-  tokens of *total* concurrent context — ~0.433 GB/1K tokens against the
-  guard's 66 GB dynamic ceiling, ADR-011 — and eight 25–45K agentic streams
-  oversubscribe it ~3×: guard 400s, decode collapse, cache-evict spiral. At 4,
-  matching the pi subagent spawn cap, excess requests queue at admission and
-  consume no KV), `--api-key` from the 0600 file. The pi provider advertises
-  `contextWindow 76800` (the measured prefill-guard acceptance boundary,
-  ADR-011) and `maxTokens 8192` (ADR-012).
+  `--paged-ssd-cache-dir ~/.omlx/cache`, `--paged-ssd-cache-max-size 50GB`
+  (oMLX defaults the SSD tier to 100 GB; 50 GB keeps model + cache inside the
+  preflight's 130 GB free-disk budget), `--hot-cache-max-size 8GB` (the
+  gpt-oss weights leave no room for the GLM-era 24 GB tier under the ~73 GB
+  dynamic ceiling; 8 GB validated by the ADR-013 soak — prefix reuse 0.980),
+  `--max-concurrent-requests 1` (ADR-013's **serial** mark: the host serves
+  one request at a time by design, and the flag turns that client assumption
+  into a server-enforced invariant — a double-fired step or stray second
+  client queues at admission, consuming no KV; restoring parallel serving is a
+  model rollback, not a flag tweak), `--api-key` from the 0600 file. The pi
+  provider advertises `contextWindow 122880` (native 131,072 minus the 8,192
+  decode reservation — the model's position limit, not the guard, binds;
+  ADR-013) and `maxTokens 8192` (ADR-012, carried forward). Deep transcripts
+  should compact around ~60K tokens — past that the enforcer brushes soft
+  pressure and can transiently pause prefill (benign, self-recovering).
 - **Metal wired limit:** raise `iogpu.wired_limit_mb` to ~96 GB (98304); persist
   across reboot via a LaunchDaemon (sudo). The daemon stays loaded even when the
   server is stopped — it is a ceiling, not a reservation, and costs no memory idle.
@@ -218,11 +230,11 @@ best-current-model review.
   `protect-dev`/`protect-main` rulesets — renaming a job breaks its ruleset
   binding (ADR-007). The workflow files carry their own config comments.
 - `adrs/` — decision records (MADR minimal template in `TEMPLATE.md`; sequential,
-  zero-padded three digits). ADR-009 + ADR-010 are the current lineup decision,
-  with ADR-011 (pi contextWindow 76800) and ADR-012 (concurrency mark 4,
-  maxTokens 8192) the current serving-boundary amendments;
-  each file's `Status:` line carries the supersession chain (see "What this
-  repository is" above).
+  zero-padded three digits). ADR-009 (structure) + ADR-013 (serial
+  architecture, gpt-oss workhorse, mark 1, contextWindow 122880) are the
+  current lineup decision; ADR-010/011/012 are the amended GLM-era parameters
+  (the documented fallback configuration); each file's `Status:` line carries
+  the supersession chain (see "What this repository is" above).
 - `docs/router-wiring.md` — wiring the server into the .NET `IInferenceBackend` /
   `FallbackInferenceRouter`.
 - `docs/workhorse-probes.md` — one-time on-host probes to run before trusting the
@@ -280,9 +292,11 @@ After the server is up, validate against `http://localhost:8000/v1` (the script'
 1. `GET /v1/models` with the API key.
 2. A small `/v1/chat/completions` call.
 3. A **tool-calling** call confirming the model emits well-formed `tool_call`
-   markup — the orchestrator depends on this; flag if the parser needs config.
-4. A **2-way concurrency probe** (two parallel completions) — a general health
-   check that the batched LLM engine handles the fan-out this project serves.
+   markup (Harmony parsing on oMLX) — the orchestrator depends on this; flag
+   if the parser needs config.
+4. An **admission-queueing probe** (two parallel completions against the
+   serial mark of 1) — the second request must queue at admission and
+   complete, verifying the serial invariant degrades gracefully.
 5. A `POST /v1/messages` call confirming the Anthropic-style endpoint is reachable.
 6. An **effective cache-mode check**: the running instance's
    `PagedSSDCacheManager initialized:` log line must carry `hot_cache=` —
@@ -297,8 +311,10 @@ Anthropic-style clients use `/v1/messages`. The downstream consumer is an
 `IInferenceBackend` / `FallbackInferenceRouter`: fast/balanced roles →
 `coding-workhorse` (the single pinned local model); the quality role → the
 **cloud frontier** provider, never a local tier (see `docs/router-wiring.md`).
-Tool-bearing requests need `max_tokens ≥ ~200` — GLM emits a reasoning preamble
-before the tool call (validation uses 256).
+Tool-bearing requests need generous `max_tokens` — gpt-oss emits a Harmony
+reasoning channel before the tool call (validation uses 512). Under the serial
+mark, a prefill-guard 400 means "this one request is genuinely too big —
+compact and resubmit," not concurrency contention.
 
 ## Teardown
 
@@ -321,8 +337,9 @@ brew uninstall omlx && brew untap jundot/omlx
 # 4. Remove data (the API key + cache/logs, the workhorse, and any fallback/
 #    retired models still on disk)
 rm -rf ~/.omlx          # includes the 0600 api-key
-rm -rf ~/models/GLM-4.7-Flash-6bit
-rm -rf ~/models/GLM-4.7-Flash-8bit \
+rm -rf ~/models/gpt-oss-120b-4bit
+rm -rf ~/models/GLM-4.7-Flash-6bit \
+       ~/models/GLM-4.7-Flash-8bit \
        ~/models/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit \
        ~/models/Qwen3-Coder-Next-MLX-4bit   # fallbacks/retired tiers, if present
 ```

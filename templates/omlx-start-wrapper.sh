@@ -60,20 +60,21 @@ fi
 # saturation surfaces as server-level backpressure, not Metal wiring failures. It
 # replaced the removed --max-process-memory flag (ADR-002); per oMLX #702 it
 # monitors Metal allocations, not total RSS.
-# --hot-cache-max-size accepts both absolute sizes ('24GB') and percentages
-# ('20%'). We pin an absolute 24GB for a deterministic hot-cache footprint
-# independent of how oMLX resolves a percentage (≈ 27% of the 90 GB guard — up
-# from ADR-006's 18GB: one model, no second cache to fund; ADR-009).
+# --hot-cache-max-size accepts both absolute sizes ('8GB') and percentages
+# ('20%'). We pin an absolute 8GB for a deterministic hot-cache footprint:
+# the gpt-oss workhorse's 61.6 GB of weights leave no room for the GLM-era
+# 24GB tier under the guard's ~73 GB dynamic ceiling; 8GB was the sizing
+# validated by the ADR-013 4-hour serial soak (prefix-cache reuse 0.980).
 # --paged-ssd-cache-max-size caps the SSD tier of the prefix cache; left unset,
-# oMLX defaults it to 100GB — past the setup preflight's 90 GB free-disk budget.
-# 50GB keeps model (~24 GB) + SSD cache inside that budget with ~16 GB slack.
-# --max-concurrent-requests 4 is ADR-012's large-context Mark, amending
-# ADR-010's 8 (which was measured at ~16K contexts). The KV pool is ~83K tokens
-# of TOTAL concurrent context (66 GB dynamic ceiling − ~30 GB weights/baseline
-# at ~0.433 GB/1K tokens — ADR-011); eight admitted 25-45K agentic streams
-# oversubscribe it ~3× (2026-07-26 incident: guard 400s at 40K/53K, decode
-# collapse, cache-evict spiral — pi_config#889). At 4 — matching the pi
-# subagent spawn cap — excess requests queue at admission, consuming no KV.
+# oMLX defaults it to 100GB. 50GB keeps model (~66 GB) + SSD cache inside the
+# setup preflight's 130 GB free-disk budget with headroom.
+# --max-concurrent-requests 1 is ADR-013's serial mark, superseding ADR-012's
+# 4: the host serves a strictly serial workflow (one request in flight, growing
+# transcript), and the workhorse's weights leave no multi-stream KV pool. The
+# flag converts the client-side serial assumption into a server-enforced
+# invariant — a double-fired step or stray second client queues at admission
+# (consuming no KV) instead of competing for the pool. Restoring parallel
+# serving is a MODEL decision (revert to the GLM fallback), not a flag tweak.
 # --host pins the loopback bind explicitly so "local-only" does not depend on an
 # upstream default (one oMLX config class defaults to 0.0.0.0).
 exec "__BREW_PREFIX__/bin/omlx" serve \
@@ -83,6 +84,6 @@ exec "__BREW_PREFIX__/bin/omlx" serve \
     --memory-guard-gb 90 \
     --paged-ssd-cache-dir "__CACHE_DIR__" \
     --paged-ssd-cache-max-size 50GB \
-    --hot-cache-max-size 24GB \
-    --max-concurrent-requests 4 \
+    --hot-cache-max-size 8GB \
+    --max-concurrent-requests 1 \
     --api-key "$api_key"

@@ -1,6 +1,9 @@
 # ADR-011: pi-advertised contextWindow lowered to the prefill-guard boundary
 
-- Status: accepted
+- Status: accepted (contextWindow superseded by
+  [ADR-013](013-gptoss-serial-workhorse.md): 76800 → 122880 — the binding
+  constraint moved from the prefill guard to the new workhorse's native
+  position limit)
 - Date: 2026-07-26 ([#50](https://github.com/psmfd/local-llm/issues/50);
   benchmark in [pi_config#889](https://github.com/psmfd/pi_config/issues/889#issuecomment-5083521123))
 

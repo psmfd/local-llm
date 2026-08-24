@@ -6,6 +6,21 @@ review flagged. None is part of `--validate` — each needs a long prompt, a
 model-behavior judgement, or a host-level measurement that the scripted checks
 deliberately avoid.
 
+> **ADR-013 model swap (2026-08-24):** the workhorse is now
+> `gpt-oss-120b-4bit`; probes 1 (MLA-specific) and 2 (`enable_thinking`, a
+> GLM-ism) describe the **GLM fallback configuration** — run them only when
+> rolling back to `workhorse-glm`. The gpt-oss equivalents were measured in
+> [#73](https://github.com/psmfd/local-llm/issues/73): KV slope ~0.070 GB/1K
+> (sliding-window + GQA; oMLX block estimator 4.50 MB/64 tok), prefill ladder
+> 100K/120K/130K-token prompts all ACCEPTED (1,148/1,067/994 tok/s; decode
+> 47.2/41.0/36.1 after), Harmony tool battery 58/58 incl. 13K-deep needles,
+> reasoning control via `chat_template_kwargs: {"reasoning_effort": ...}`
+> (the top-level param is ignored — the probe-2 analog), single-stream decode
+> ~106 tok/s short-context (probe-5 analog), and a 4.09 h serial soak on the
+> ADR-013 flags (962 steps, reuse 0.980, RSS flat, 8 transient
+> `adaptive_prefill_throttle` pauses at ~60–70K depth — compact around ~60K).
+> Re-run the #73 gauntlet after any oMLX, macOS, or model change.
+>
 > **Last run: 2026-07-02, oMLX 0.4.4 — both probes PASS.** Probe 1: baseline
 > 30.0 GB resident; a 19,470-token prompt added +2.1 GB resident / +7.0 GB peak
 > (MLA-class — an MHA fallback would have added ~18 GB), with 19,456/19,470

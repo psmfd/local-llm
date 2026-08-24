@@ -1,6 +1,8 @@
 # ADR-010: 6-bit workhorse quant and a sustained concurrency mark of 8
 
-- Status: accepted
+- Status: accepted (amended by [ADR-013](013-gptoss-serial-workhorse.md) — the
+  GLM-specific quant choice and sustained mark go dormant with the workhorse
+  swap; the 6-bit remains the primary-fallback configuration)
 - Date: 2026-07-04 ([#22](https://github.com/psmfd/local-llm/issues/22),
   [#23](https://github.com/psmfd/local-llm/issues/23))
 
