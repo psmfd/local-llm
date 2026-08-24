@@ -66,6 +66,15 @@ deliberately avoid.
 > one-time SSD-cache partial invalidation at first start (831/3,872 blocks
 > skipped) was expected. See the probe-2 "0.5.7 smoke" note and the probe-3
 > "0.5.7 re-baseline" subsection.
+>
+> **Probe 5 first run: 2026-08-21, oMLX 0.5.7 (MLX 0.32.0), macOS 26.5.2 —
+> single-stream decode baseline 83.1 tok/s median** at short context
+> (three runs, 83.0–83.4 — see probe 5). Live-log anchors at long context:
+> ~44–47 tok/s at ~44K-token prompts; 36.6 tok/s across a 16K-token
+> generation. Captured during the serial-workload assessment as the
+> denominator for any future speculative-decoding A/B (#71 — DFlash revisit,
+> closed no-go: no trained DFlash draft checkpoint or dflash-mlx target
+> adapter exists for `Glm4MoeLiteForCausalLM`).
 
 Prereqs: server provisioned, `omlxctl start` done, `KEY="$(cat ~/.omlx/api-key)"`.
 
@@ -432,6 +441,74 @@ jundot/omlx#1835).
 56.7 TFLOPS fp16 / 57.3 TFLOPS bf16 vs the 0.5.3 baseline 57.4/57.3 — within
 noise; Neural Accelerators engaged — PASS
 (`.session-notes/057-rebaseline/results.md`).
+
+## 5. Single-stream decode baseline (serial-workload reference)
+
+**Why.** Every decode figure the earlier probes recorded was measured under
+concurrent load and is contaminated by contention (probe 3's 0.9–7.9 tok/s
+figures are the #45 head-of-line-fairness artifact, not a hardware ceiling).
+The repo had no clean single-stream number at all — yet that number is the
+denominator for any speculative-decoding A/B (see #71) and the operative
+throughput figure if the client workload ever runs serially. This probe
+records it.
+
+**Procedure.** One isolated streaming completion at a time, no concurrent
+traffic (check `omlxctl logs` for a quiet window first). Small cold prompt so
+prefill is negligible; decode tok/s excludes TTFT by timing first-to-last
+streamed token:
+
+```bash
+python3 - <<'EOF'
+import json, statistics, time, urllib.request
+from pathlib import Path
+KEY = Path.home().joinpath(".omlx/api-key").read_text().strip()
+PROMPT = ("Write a detailed technical explanation of how CPU cache "
+          "hierarchies work. Be thorough and keep going until cut off.")
+results = []
+for i in range(3):
+    body = json.dumps({"model": "coding-workhorse",
+                       "messages": [{"role": "user", "content": PROMPT}],
+                       "max_tokens": 1024, "stream": True,
+                       "stream_options": {"include_usage": True}}).encode()
+    req = urllib.request.Request(
+        "http://localhost:8000/v1/chat/completions", data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {KEY}"})
+    t0 = time.monotonic(); t_first = t_last = None; usage = None
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            evt = json.loads(line[6:])
+            if evt.get("usage"):
+                usage = evt["usage"]
+            ch = evt.get("choices") or []
+            d = ch[0].get("delta") if ch else None
+            if d and (d.get("content") or d.get("reasoning_content")):
+                t_last = time.monotonic()
+                t_first = t_first or t_last
+    n = usage["completion_tokens"]
+    toks = round((n - 1) / (t_last - t_first), 2)
+    print(f"run {i+1}: ttft={t_first-t0:.3f}s tokens={n} decode={toks} tok/s")
+    results.append(toks); time.sleep(2)
+print("median:", statistics.median(results), "tok/s")
+EOF
+```
+
+**Pass:** n/a — a reference measurement, not a gate. Record the median and
+compare against the prior entry after any oMLX, MLX, macOS, or quant change;
+an unexplained regression is grounds to bisect before trusting the upgrade.
+
+**Last run (2026-08-21, oMLX 0.5.7 brew keg, MLX 0.32.0, macOS 26.5.2):**
+**83.1 tok/s median** (83.39 / 82.96 / 83.10 — spread under 0.5%), TTFT
+0.33–0.45 s, 48-token cold prompt (`cached=0` all runs), 1024-token
+generations. Context-length sensitivity from the same day's live logs
+(serial requests, warm cache): ~44–47 tok/s at ~44–45K-token prompts and
+36.6 tok/s across a full 16K-token generation at ~45.8K prompt — attention/
+KV-read cost roughly halves decode speed by ~45K context. Captured for the
+serial-workload assessment and the #71 DFlash revisit (closed no-go —
+architecture unsupported; the baseline outlives the ticket).
 
 Note the outcome (date, oMLX version, pass/fail, measured numbers) in the PR or
 issue that prompted the re-run. If probe 1 fails, that is grounds to revisit
