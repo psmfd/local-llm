@@ -4,7 +4,7 @@
 #
 # The server is NOT started at login (the LaunchAgent is RunAtLoad=false). Startup
 # is intentional: this tool starts it on demand and stops it cleanly so the
-# resident model (~24 GB) + KV/prefix cache are released back to the system.
+# resident model (~66 GB) + KV/prefix cache are released back to the system.
 #
 # Usage:
 #   omlxctl start    Start the server (no-op if already running); wait for ready
@@ -46,8 +46,9 @@ STDOUT_LOG="${LOG_DIR}/launchagent.out.log"
 STDERR_LOG="${LOG_DIR}/launchagent.err.log"
 TAIL_LINES="${OMLX_TAIL_LINES:-80}"
 
-# Cold start loads ~24 GB from disk and wires it; ~90s is typical, so poll /health
-# up to READY_TIMEOUT. SIGTERM flushes up to 24 GB of hot cache to SSD on shutdown,
+# Cold start loads ~66 GB from disk and wires it (~10–25s measured on-host, but
+# allow slack), so poll /health up to READY_TIMEOUT. SIGTERM flushes up to 8 GB
+# of hot cache to SSD on shutdown,
 # so allow STOP_TIMEOUT before escalating to SIGKILL. (ADR-005; omlx serve timings.)
 READY_TIMEOUT="${OMLX_READY_TIMEOUT:-120}"
 STOP_TIMEOUT="${OMLX_STOP_TIMEOUT:-30}"
@@ -94,7 +95,7 @@ _wait_ready() {
         return 0
     fi
     local deadline=$(( $(date +%s) + READY_TIMEOUT ))
-    info "Waiting for ${HEALTH_URL} (up to ${READY_TIMEOUT}s; cold start loads ~24 GB)"
+    info "Waiting for ${HEALTH_URL} (up to ${READY_TIMEOUT}s; cold start loads ~66 GB)"
     while :; do
         if _health_ok; then return 0; fi
         if ! _is_running; then

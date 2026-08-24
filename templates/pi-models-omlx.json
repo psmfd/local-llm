@@ -8,22 +8,27 @@
 // request time and never stored as a literal — this file contains no secret.
 //
 // compat flags for oMLX's OpenAI-completions endpoint:
-//   supportsDeveloperRole: false    — oMLX/Qwen do not accept the 'developer' role
-//   supportsReasoningEffort: false  — reasoning_effort is not implemented
+//   supportsDeveloperRole: false    — oMLX does not accept the 'developer' role
+//   supportsReasoningEffort: false  — the TOP-LEVEL reasoning_effort param is
+//                                     ignored by oMLX 0.5.7 (verified in
+//                                     psmfd/local-llm#73); effort control is
+//                                     delivered via chat_template_kwargs by the
+//                                     pi payload-tuner (pi_config#1052)
 //   supportsUsageInStreaming: true  — oMLX serves usage in the final stream chunk
 //                                     when stream_options.include_usage is requested
 //                                     (verified live 2026-07-05; psmfd/local-llm#34)
 //
-// Single workhorse model (ADR-009), addressed by its oMLX ALIAS (verified to
-// resolve on the installed version):
-//   coding-workhorse  GLM-4.7-Flash-6bit  pinned, sole resident model (ADR-010)
+// Single workhorse model (ADR-009 structure, ADR-013 model), addressed by its
+// oMLX ALIAS (verified to resolve on the installed version):
+//   coding-workhorse  gpt-oss-120b-4bit  pinned, sole resident model (ADR-013)
 // High-fidelity work routes to the cloud frontier, not this provider.
 //
-// contextWindow is held to 76800 (far inside GLM's 202K native context): the
-// prefill memory guard rejects single prefills above ~84K tokens at its
-// observed idle dynamic ceiling (66 GB; KV+SDPA ~0.433 GB/1K tokens — ADR-011,
-// pi_config#889), and safe concurrency is prefill-activation-bound (ADR-009
-// "The Mark"). 76800 keeps pi compacting before the guard returns 400s.
+// contextWindow 122880 = gpt-oss-120b's native 131,072 positions minus the
+// 8,192 maxTokens decode reservation. The model's position limit — not the
+// prefill guard — is the binding constraint (ADR-013: 130K-token prompts
+// accepted fresh-idle and post-soak; KV ~0.070 GB/1K). pi SHOULD still compact
+// deep transcripts around ~60K tokens: past that the memory enforcer brushes
+// soft pressure and can transiently pause prefill (benign, self-recovering).
 {
   "providers": {
     "omlx": {
@@ -39,8 +44,8 @@
       "models": [
         {
           "id": "__MODEL_ID__",
-          "name": "coding-workhorse — GLM-4.7-Flash (local oMLX)",
-          "reasoning": false,
+          "name": "coding-workhorse — gpt-oss-120b (local oMLX)",
+          "reasoning": true,
           "input": ["text"],
           "contextWindow": __PI_CONTEXT_WINDOW__,
           "maxTokens": __PI_MAX_TOKENS__,

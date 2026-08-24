@@ -12,7 +12,7 @@
 #   ./setup-omlx-m5.sh [options]
 #
 # Options:
-#   --download-model   Download the coding-workhorse model (~24 GB) via
+#   --download-model   Download the coding-workhorse model (~66 GB) via
 #                      `hf download`. Off by default. Retired ADR-006 tiers are
 #                      never downloaded. Existing model dirs are skipped (never
 #                      re-downloaded or deleted), so this is safe to re-run when
@@ -81,50 +81,53 @@ WIRED_LIMIT_MB=98304    # 96 GB; leaves ~32 GB for macOS on a 128 GB host (ADR-0
 WIRED_MIN_MB=90000      # wrapper warns below this
 
 MIN_RAM_GB=120
-MIN_DISK_GB=90          # GLM-4.7-Flash-6bit (~24 GB) + SSD prefix-cache tier
-                        # capped at 50 GB + hf staging/logs headroom (ADR-010).
+MIN_DISK_GB=130         # gpt-oss-120b-4bit (~66 GB) + SSD prefix-cache tier
+                        # capped at 50 GB + hf staging/logs headroom (ADR-013).
                         # Gates required FREE space only — retired tiers and the
-                        # 8-bit fallback already on disk are sunk cost, not part
+                        # GLM fallbacks already on disk are sunk cost, not part
                         # of this floor.
 
-# --- Model lineup (ADR-009 lineup, ADR-010 quant: single Mac workhorse) ------
-# ADR-006's three co-resident/on-demand tiers are retired: the cloud provider is
-# now the quality frontier and the Mac's only job is to serve a homogeneous
-# subagent fan-out from ONE pinned model, maximizing shared prefix-cache reuse
-# and KV headroom under the 90 GB guard. The model is a verified TEXT-ONLY MLX
-# coder build (no vision_config → batched LLM engine, no engine override) and
-# tool-call-verified on oMLX. ADR-010 moved the quant 8-bit → 6-bit after an
-# on-host A/B measured quality parity (tool-calls 58/58 each; HumanEval 81.7%
-# vs 80.5%, statistical tie) and a doubled sustained-load margin. Repo ID
-# verified against HuggingFace config.json 2026-07-04 (ADR-010); re-probed
-# before download. See adrs/010-6bit-workhorse-sustained-mark.md (decision),
-# adrs/009-mac-single-workhorse-cloud-frontier.md (lineup), and
-# docs/workhorse-probes.md (probe 3 — the sustained-load measurements).
+# --- Model lineup (ADR-009 structure, ADR-013 model: single Mac workhorse) ---
+# ADR-009's single-pinned-workhorse + cloud-frontier structure stands; ADR-013
+# swapped the model and the serving shape: the Mac now serves a STRICTLY SERIAL
+# workflow (one request in flight, growing transcript) rather than a parallel
+# fan-out, and the workhorse is gpt-oss-120b-4bit (117B total / 5.1B active
+# MoE, alternating sliding-window/full attention, ~0.070 GB/1K KV — a single
+# stream reaches the model's full native 131,072 context inside the guard).
+# A verified TEXT-ONLY MLX build (no vision_config → batched LLM engine, no
+# engine override), Harmony tool calling verified 58/58 on oMLX 0.5.7, and
+# HumanEval 95.7% vs the GLM incumbent's 83.5% (McNemar p=0.00018). Repo ID
+# verified against HuggingFace config.json 2026-08-21 (#73); re-probed before
+# download. See adrs/013-gptoss-serial-workhorse.md (decision + evidence),
+# adrs/009-mac-single-workhorse-cloud-frontier.md (structure), and
+# docs/workhorse-probes.md (probe measurements).
 #
 # TIER_MODELS holds exactly one entry, "repo|alias|pinned(true|false)", so every
 # existing loop (download, pi-config, pin/alias, validate) works unchanged over a
 # 1-element, Bash-3.2-safe indexed array (macOS default shell).
 TIER_MODELS=(
-    "mlx-community/GLM-4.7-Flash-6bit|coding-workhorse|true"
+    "mlx-community/gpt-oss-120b-4bit|coding-workhorse|true"
 )
 # The workhorse's alias drives the detailed validation probes below
 # (chat/tool/concurrency).
 PRIMARY_ALIAS="coding-workhorse"
 
 # RETIRED_MODELS: models this script no longer downloads, aliases, or validates
-# — the ADR-006 tiers plus the ADR-010-retired 8-bit workhorse. Entries stay on
-# disk (never deleted); the 8-bit is the PRIMARY inactive fallback (same model,
-# quality-parity-tested rollback) and Qwen3-Coder-30B the secondary
-# (different-family) fallback. apply_pins clears is_pinned/dflash on these —
-# only when they already exist in oMLX's model_settings.json — so an upgraded
-# host actually frees the memory. Format: "repo|alias_to_set" (2 fields — no pin
-# field; the action is always force-unpin). The alias field is what the unpin
-# PUT SETS: for the ADR-006 tiers it echoes their old alias unchanged (the admin
-# PUT's replace-vs-merge semantics for omitted fields are unverified; a stale
-# alias on an unpinned model is inert), but for the 8-bit it RENAMES the model
-# off 'coding-workhorse' so the primary alias transfers cleanly to the 6-bit —
+# — the ADR-006 tiers plus the retired GLM workhorses (ADR-010's 8-bit, and
+# ADR-013's 6-bit). Entries stay on disk (never deleted); the GLM-4.7-Flash-
+# 6bit is the PRIMARY inactive fallback (full ADR-009/010 probe history,
+# pinned-swap rollback per ADR-013), the 8-bit and Qwen3-Coder-30B the deeper
+# fallbacks. apply_pins clears is_pinned/dflash on these — only when they
+# already exist in oMLX's model_settings.json — so an upgraded host actually
+# frees the memory. Format: "repo|alias_to_set" (2 fields — no pin field; the
+# action is always force-unpin). The alias field is what the unpin PUT SETS:
+# for the ADR-006 tiers it echoes their old alias unchanged (the admin PUT's
+# replace-vs-merge semantics for omitted fields are unverified; a stale alias
+# on an unpinned model is inert), but for the GLM-6bit it RENAMES the model
+# off 'coding-workhorse' so the primary alias transfers cleanly to gpt-oss —
 # which is why the unpin pass runs BEFORE the workhorse pin in apply_pins.
 RETIRED_MODELS=(
+    "mlx-community/GLM-4.7-Flash-6bit|workhorse-glm"
     "mlx-community/GLM-4.7-Flash-8bit|workhorse-8b"
     "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit|coding-fast"
     "lmstudio-community/Qwen3-Coder-Next-MLX-4bit|coding-quality"
@@ -139,17 +142,19 @@ tier_pin()   { printf '%s' "${1##*|}"; }
 tier_dir()   { printf '%s' "$MODELS_DIR/$(basename "$(tier_repo "$1")")"; }
 
 # Pi coding-agent provider registration (--configure-pi). contextWindow is
-# 76800 — far inside GLM-4.7-Flash's 202K native context because the prefill
-# memory guard, not the model, is the binding limit: KV+SDPA grows ~0.433 GB
-# per 1K prompt tokens and the guard's dynamic ceiling (66 GB observed idle,
-# lower under load) rejects single prefills above ~84K tokens (ADR-011;
-# pi_config#889 ladder benchmark). 76800 leaves margin so pi compacts before
-# the guard 400s. Concurrency is the other cap (ADR-009 "The Mark", ADR-010).
+# 122880 — gpt-oss-120b's native 131,072 positions minus the 8,192 maxTokens
+# decode reservation. Unlike the GLM era (ADR-011, guard-bound at 76800), the
+# MODEL's position limit is now the binding constraint: the ~0.070 GB/1K KV
+# slope keeps a full-native-context single stream inside the guard's dynamic
+# ceiling — the #73 ladder accepted 130K-token prompts fresh-idle AND after a
+# 4-hour warm-cache soak (ADR-013). Deep transcripts SHOULD still compact
+# around ~60K tokens: past that the enforcer brushes soft pressure and can
+# transiently pause prefill (benign, self-recovering — ADR-013 consequences).
 PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
-PI_CONTEXT_WINDOW=76800
+PI_CONTEXT_WINDOW=122880
 # maxTokens 8192: pi's output shrink ladder caps completions at 8,000
-# (pi_config ADR-0108); a larger value only inflates the prefill guard's
-# decode reservation on a KV-pool-constrained host (ADR-012).
+# (pi_config ADR-0108); stands under ADR-013 — it also sets the decode
+# reservation subtracted from the native window for contextWindow above.
 PI_MAX_TOKENS=8192
 
 DAEMON_LABEL="com.local.iogpu-wired-limit"
@@ -773,8 +778,8 @@ print_pin_instructions() {
 #   absent  oMLX has never registered this model — no PUT should be sent
 #           (retired tiers are never actively aliased/registered by us)
 #   dirty   present and still is_pinned or dflash_ssd_cache — OR still holding
-#           the primary alias (an unpinned 8-bit squatting on 'coding-workhorse'
-#           would collide with the 6-bit's alias PUT; ADR-010) — needs a PUT
+#           the primary alias (an unpinned GLM squatting on 'coding-workhorse'
+#           would collide with the workhorse's alias PUT; ADR-010/013) — needs a PUT
 #   clean   present, unpinned/dflash-off, not on the primary alias — nothing to do
 # Shared by pins_converged (gate) and apply_pins (action) — one source of truth.
 retired_model_state() {
@@ -1228,9 +1233,10 @@ validate_endpoint() {
         return
     fi
 
-    # 2. chat completion. max_tokens >= ~200 everywhere: GLM-4.7-Flash emits a
-    # reasoning preamble before the answer/tool call and 120 tokens truncated
-    # mid-call in testing (ADR-009).
+    # 2. chat completion. Generous max_tokens everywhere: gpt-oss emits a
+    # Harmony reasoning channel before the answer/tool call (default effort
+    # medium), so tight budgets truncate mid-reasoning (ADR-013; the GLM-era
+    # preamble constraint had the same shape).
     local chat_req chat_resp
     chat_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"Reply with the single word: pong"}],"max_tokens":256}'
     if chat_resp="$(curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" 2>/dev/null)"; then
@@ -1240,9 +1246,10 @@ validate_endpoint() {
         record_err "validate-chat" "chat completion request failed"
     fi
 
-    # 3. tool-calling
+    # 3. tool-calling (Harmony format; max_tokens 512 covers the reasoning
+    # channel ahead of the call — the #73 battery ran 58/58 at this budget)
     local tool_req tool_resp
-    tool_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"What files are in the current directory? Use the tool."}],"tools":[{"type":"function","function":{"name":"list_dir","description":"List files in a directory","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"tool_choice":"auto","max_tokens":256}'
+    tool_req='{"model":"'"$PRIMARY_ALIAS"'","messages":[{"role":"user","content":"What files are in the current directory? Use the tool."}],"tools":[{"type":"function","function":{"name":"list_dir","description":"List files in a directory","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"tool_choice":"auto","max_tokens":512}'
     if tool_resp="$(curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$tool_req" "${base}/chat/completions" 2>/dev/null)"; then
         if echo "$tool_resp" | grep -q 'tool_calls'; then
             ok "validate-tools" "model emitted tool_calls markup"
@@ -1254,18 +1261,21 @@ validate_endpoint() {
         record_err "validate-tools" "tool-calling request failed"
     fi
 
-    # 4. concurrency probe — two parallel completions confirm the batched LLM
-    # engine handles the fan-out this project exists to serve. A single-stream
-    # check cannot detect a server that serializes or fails under concurrency.
+    # 4. admission-queueing probe — two parallel requests against the serial
+    # mark (--max-concurrent-requests 1, ADR-013): the second MUST queue at
+    # admission and then complete, not error. This verifies the serial
+    # invariant degrades gracefully when a client misbehaves (double-fired
+    # step, stray second client) — the failure mode the mark-1 flag exists to
+    # absorb. Both requests completing is the pass condition.
     local pid1 pid2 rc1=0 rc2=0
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid1=$!
     curl -fsS -H "$auth" -H 'Content-Type: application/json' -d "$chat_req" "${base}/chat/completions" >/dev/null 2>&1 & pid2=$!
     wait "$pid1" || rc1=$?
     wait "$pid2" || rc2=$?
     if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ]; then
-        ok "validate-concurrent" "2 parallel completions succeeded (batched engine handles concurrency)"
+        ok "validate-queueing" "2 parallel requests both completed (second queued at admission per the serial mark)"
     else
-        record_err "validate-concurrent" "parallel completions failed (rc ${rc1}/${rc2}) — check --max-concurrent-requests and the server logs ($LOG_DIR)"
+        record_err "validate-queueing" "queued request failed (rc ${rc1}/${rc2}) — check --max-concurrent-requests and the server logs ($LOG_DIR)"
     fi
 
     # 5. Anthropic-style messages endpoint (spec requires /v1/messages reachability)

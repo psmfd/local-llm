@@ -1,6 +1,8 @@
 # ADR-012: concurrency mark 4 and maxTokens 8192 for the large-context era
 
-- Status: accepted
+- Status: accepted (concurrency mark superseded by
+  [ADR-013](013-gptoss-serial-workhorse.md): 4 → 1 under the serial workflow
+  architecture; the maxTokens 8192 decision stands)
 - Date: 2026-07-26 ([#52](https://github.com/psmfd/local-llm/issues/52);
   incident analysis in [pi_config#889](https://github.com/psmfd/pi_config/issues/889))
 
