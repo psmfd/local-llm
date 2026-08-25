@@ -75,8 +75,10 @@ omlxctl restart  # atomic restart + wait         |  omlxctl status  # launchd + 
 Exit codes: `0` pass, `1` errors, `2` precondition failure. The Metal
 wired-limit step needs `sudo`. The workhorse alias + pin is applied via the
 **oMLX admin API** (`apply_pins` briefly starts the server, PUTs the model's
-settings — and **unpins any retired tiers** it finds registered, renaming the
-GLM-6bit to alias `workhorse-glm` (and the 8-bit to `workhorse-8b`) so the
+settings, including `is_default` so the **pinned workhorse owns the default
+model** (#77 — oMLX otherwise derives it from registry order, which lands on a
+retired tier) — and **unpins any retired tiers** it finds registered, renaming
+the GLM-6bit to alias `workhorse-glm` (and the 8-bit to `workhorse-8b`) so the
 primary alias transfers to gpt-oss — then stops it; `model_settings.json` is
 oMLX-owned, so the script never writes it directly); it degrades to printed
 manual admin-panel steps if the API can't be reached (ADR-009/013).
@@ -305,7 +307,9 @@ After the server is up, validate against `http://localhost:8000/v1` (the script'
    too and is NOT diagnostic). Setup's `converge_settings` step repairs
    persisted `settings.json` drift against the wrapper flags (server stopped);
    `apply_pins` additionally unpins any STRAY pin outside the tier lineup
-   (#43, sole-resident invariant), warning loudly by name.
+   (#43, sole-resident invariant) and clears any STRAY `is_default` (#77 — a
+   default can sit on an *unpinned* model, so it needs its own pass), warning
+   loudly by name.
 
 Anthropic-style clients use `/v1/messages`. The downstream consumer is an
 `IInferenceBackend` / `FallbackInferenceRouter`: fast/balanced roles →
