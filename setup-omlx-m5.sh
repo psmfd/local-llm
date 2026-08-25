@@ -779,8 +779,11 @@ print_pin_instructions() {
 #           (retired tiers are never actively aliased/registered by us)
 #   dirty   present and still is_pinned or dflash_ssd_cache — OR still holding
 #           the primary alias (an unpinned GLM squatting on 'coding-workhorse'
-#           would collide with the workhorse's alias PUT; ADR-010/013) — needs a PUT
-#   clean   present, unpinned/dflash-off, not on the primary alias — nothing to do
+#           would collide with the workhorse's alias PUT; ADR-010/013) — OR
+#           still holding is_default (#77: a retired tier must not be the
+#           model the server resolves for a default-model consumer) — needs a PUT
+#   clean   present, unpinned/dflash-off, not on the primary alias, not the
+#           default — nothing to do
 # Shared by pins_converged (gate) and apply_pins (action) — one source of truth.
 retired_model_state() {
     local repo="$1"
@@ -795,6 +798,7 @@ m = models.get(sys.argv[2])
 if not m:
     print("absent")
 elif (bool(m.get("is_pinned")) or bool(m.get("dflash_ssd_cache"))
+      or bool(m.get("is_default"))
       or m.get("model_alias") == sys.argv[3]):
     print("dirty")
 else:
@@ -827,9 +831,14 @@ for t in sys.argv[2:]:
     m = models.get(mid)
     if not m or m.get("model_alias") != alias or bool(m.get("is_pinned")) != (pin == "true"):
         sys.exit(1)
-# Sole-resident invariant: any pin outside the tier lineup is a stray (#43).
+    # The pinned workhorse must also OWN the default (#77): oMLX otherwise
+    # derives it from registry order, which lands on a retired tier.
+    if pin == "true" and not bool(m.get("is_default")):
+        sys.exit(1)
+# Sole-resident invariant: any pin — or default (#77) — outside the tier
+# lineup is a stray (#43).
 for mid, m in models.items():
-    if bool(m.get("is_pinned")) and mid not in pinned_tiers:
+    if mid not in pinned_tiers and (bool(m.get("is_pinned")) or bool(m.get("is_default"))):
         sys.exit(1)
 sys.exit(0)
 PYEOF
@@ -864,6 +873,31 @@ for t in sys.argv[2:]:
         pinned_tiers.add(os.path.basename(repo))
 for mid, m in models.items():
     if bool(m.get("is_pinned")) and mid not in pinned_tiers:
+        print(f"{mid}|{m.get('model_alias') or ''}")
+PYEOF
+}
+
+# stray_defaults — prints one "model_id|alias" line per model holding
+# is_default in model_settings.json that is not the pinned TIER_MODELS entry.
+# Mirrors stray_pins (#43) for the default flag (#77). A default can sit on an
+# UNPINNED model — the GLM-6bit case that motivated this — so stray_pins does
+# not catch it and a separate pass is required. Retired tiers handled by the
+# unpin pass may also appear here; the extra PUT is idempotent.
+stray_defaults() {
+    [ -f "$OMLX_HOME/model_settings.json" ] || return 0
+    python3 - "$OMLX_HOME/model_settings.json" "${TIER_MODELS[@]}" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+try:
+    models = json.load(open(sys.argv[1])).get("models", {})
+except Exception:
+    sys.exit(0)
+pinned_tiers = set()
+for t in sys.argv[2:]:
+    repo, alias, pin = t.split("|")
+    if pin == "true":
+        pinned_tiers.add(os.path.basename(repo))
+for mid, m in models.items():
+    if bool(m.get("is_default")) and mid not in pinned_tiers:
         print(f"{mid}|{m.get('model_alias') or ''}")
 PYEOF
 }
@@ -991,7 +1025,7 @@ apply_pins() {
             absent) skip "unpin-${rmid}" "not in model_settings.json — never registered, nothing to unpin" ;;
             clean)  skip "unpin-${rmid}" "already unpinned (DFlash off, primary alias clear)" ;;
             dirty)
-                body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+                body="{\"model_alias\":\"${ralias}\",\"is_pinned\":false,\"is_default\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
                 if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
                     -d "$body" "${base}${admin}/models/${rmid}/settings" >/dev/null 2>&1; then
                     ok "unpin-${rmid}" "retired model unpinned as '${ralias}' (stays on disk; memory freed on next start)"
@@ -1014,9 +1048,9 @@ apply_pins() {
         # (--paged-ssd-cache-dir) stays ON — its live upstream risk is oMLX #702
         # (the memory guard tracks Metal allocations, not cache RSS).
         if [ "$pin" = "true" ]; then
-            body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"dflash_ssd_cache\":false}"
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":true,\"is_default\":true,\"dflash_ssd_cache\":false}"
         else
-            body="{\"model_alias\":\"${alias}\",\"is_pinned\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
+            body="{\"model_alias\":\"${alias}\",\"is_pinned\":false,\"is_default\":false,\"ttl_seconds\":900,\"dflash_ssd_cache\":false}"
         fi
         if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
             -d "$body" "${base}${admin}/models/${mid}/settings" >/dev/null 2>&1; then
@@ -1050,6 +1084,26 @@ apply_pins() {
             record_warn "stray-pin" "stray pin on ${smid} could not be unpinned via admin PUT — unpin it manually at ${base}/admin (sole-resident invariant, ADR-009)"
         fi
     done <<< "$(stray_pins)"
+
+    # Stray defaults (#77): the default can sit on an UNPINNED model, so the
+    # stray-pin pass above does not clear it. Runs AFTER the workhorse PUT has
+    # claimed is_default, so this only ever clears a leftover holder.
+    local dmid dalias
+    while IFS='|' read -r dmid dalias; do
+        [ -n "$dmid" ] || continue
+        # dalias is operator/admin-panel state — same charset guard as the
+        # stray-pin pass; the PUT merges, so omitting it leaves it untouched.
+        case "$dalias" in
+            (*[!A-Za-z0-9._-]*|"") body="{\"is_default\":false}" ;;
+            (*) body="{\"model_alias\":\"${dalias}\",\"is_default\":false}" ;;
+        esac
+        if curl -fsS --max-time 20 -X PUT -b "$cookie_jar" -H "$auth" -H 'Content-Type: application/json' \
+            -d "$body" "${base}${admin}/models/${dmid}/settings" >/dev/null 2>&1; then
+            record_warn "stray-default" "cleared STRAY is_default on ${dmid} (alias '${dalias:-none}') — the default belongs on the pinned workhorse (#77)"
+        else
+            record_warn "stray-default" "stray is_default on ${dmid} could not be cleared via admin PUT — clear it manually at ${base}/admin (#77)"
+        fi
+    done <<< "$(stray_defaults)"
 
     if ! $workhorse_present; then
         record_warn "pin" "workhorse model not on disk — download it with --download-model, then re-run to pin it (any retired-tier memory was still freed this run)"
